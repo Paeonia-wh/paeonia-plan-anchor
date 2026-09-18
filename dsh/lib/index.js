@@ -2465,10 +2465,13 @@ function turnAnchorNotice(d, scope = "") {
 		bits.push(`在做额外步骤 ${cur.detour_no}：${cur.text}${rs ? `（主线第 ${rs.ord} 步已挂起）` : ""}`);
 	} else if (cur) {
 		bits.push(`要做：第 ${cur.ord} 步 ${cur.text}`);
-	} else if (acc.length) {
-		bits.push("✔ 要做的工作步骤都做完了");
 	} else {
-		bits.push("主线无进行中步骤");
+		// 【别撒谎】焦点落在验收步上时，不能直接说"都做完了" —— 得先看有没有**待办的工作步**。
+		// （实测踩到：第 34 步还没做，锚却说"✔ 要做的工作步骤都做完了"。）
+		const nextWork = steps.find((s) => s.status !== "done");
+		if (nextWork) bits.push(`要做：第 ${nextWork.ord} 步 ${nextWork.text}`);
+		else if (acc.length) bits.push("✔ 要做的工作步骤都做完了（剩下的是等你验收）");
+		else bits.push("主线无进行中步骤");
 	}
 	if (acc.length) bits.push(`👁 待你验收 ${acc.length} 项：${acc.map((s) => s.text).join("；")}`);
 	// 【计划演进】按论文三维公式算（见 planInflation 的注释）
