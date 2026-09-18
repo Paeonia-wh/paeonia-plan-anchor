@@ -1,0 +1,50 @@
+{
+  "name": "dsh-plan-anchor",
+  "version": "0.1.0",
+  "description": "计划锚（防漂移护栏）：把多步计划落盘成持久锚 + 新发现一律先入泊位 + 回合自动重放锚 + 漂移预算提醒。解决「执行一步时冒出新问题就一路追下去，原计划全忘、上下文混乱」。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "plan",
+    "drift",
+    "focus",
+    "guard",
+    "parking-lot",
+    "yak-shaving"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "author": "Paeonia-wh <Paeonia-wh@users.noreply.github.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Paeonia-wh/paeonia-plan-anchor.git"
+  },
+  "homepage": "https://github.com/Paeonia-wh/paeonia-plan-anchor#readme",
+  "bugs": {
+    "url": "https://github.com/Paeonia-wh/paeonia-plan-anchor/issues"
+  }
+}

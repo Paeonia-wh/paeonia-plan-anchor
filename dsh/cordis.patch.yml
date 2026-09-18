@@ -1,0 +1,20 @@
+# dsh-plan-anchor bundle patch: registers the plugin row.
+# path = 计划锚数据库（SQLite：计划/步骤/泊位/台账/按计划状态/scope 判决）。
+- insert:
+    - id: plan-anchor
+      name: dsh-plan-anchor
+      config:
+        path: !!js dshHomePath('plan-anchor/plan.db')
+        driftThreshold: 12
+        escalateAt: 24
+        detourBudget: 3
+        refuseCap: 5
+        # scope 判决档位：off | observe | advise
+        # 故意没实现 block 档 —— 先拿误报率数据，再谈硬拦（要硬拦应对齐 PreToolUse 的 deny 层）
+        scopeMode: observe
+        watchTools:
+          - task_create
+          - todo_write
+          - subagent
+          - workflow
+        turnAnchor: true

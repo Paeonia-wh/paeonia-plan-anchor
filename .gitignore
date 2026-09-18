@@ -1,0 +1,19 @@
+# 运行时数据：绝对不能上传（含真实计划与台账）
+*.db
+*.db-wal
+*.db-shm
+
+# 依赖
+node_modules/
+
+# 临时与备份
+*.bak
+*.tmp
+.tmp/
+*~
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
