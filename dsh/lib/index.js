@@ -2669,6 +2669,12 @@ function progressBriefing(d, plan) {
 
 /** 每个 agent 待处理的用户信号（pre-step 检测、下一次工具调用后注入 —— 用已验证过的注入通道）。 */
 const pendingUserSignal = new WeakMap();
+/** 【记账提醒】用户上一轮是不是只说了"一句短话"（典型的选项回答：B吧 / 需要 / 改 / 可以）。 */
+const shortTurn = new WeakMap();
+/** 本回合有没有碰过 plan_* 工具（碰过 = 记过账）。 */
+const planTouched = new WeakMap();
+/** 提醒过就不再提（每会话一次）—— 免得这个提醒自己变成墙纸。 */
+const shortWarned = new WeakSet();
 
 function apply(ctx, config) {
 	if (!config || typeof config.path !== "string" || !config.path) throw new Error("plan-anchor: `path` is required");
@@ -2967,6 +2973,9 @@ function apply(ctx, config) {
 				// 结果"他在叫你停"在几轮之后才炸出来，而那时它已经过期了。
 				if (sig) pendingUserSignal.set(agent, sig);
 				else pendingUserSignal.delete(agent);
+				// 【记账提醒用】用户这句是不是"一句短话"（选项回答/确认的典型形态）
+				shortTurn.set(agent, String(text).trim().length <= 15);
+				planTouched.delete(agent);   // 新回合，记账标记归零
 			}
 		} catch (error) {
 			try { log(d, "guard_error", { ref: "agent/pre-step", detail: String(error && error.message || error).slice(0, 200) }); } catch { /* ignore */ }
@@ -3078,6 +3087,27 @@ function observe(d, exec) {
 				].join("\n"), `scope ×${cs.ord}`);
 			}
 		}
+	}
+
+	// ⓪a 【记账提醒】用户上一轮只说了**一句短话**（"B吧"/"需要"/"改" —— 典型的选项回答），
+	//     而本回合直接动手改文件、又没碰过任何计划工具 → 提示先记账。
+	//     由来（实测连着两轮踩到）：用户说一句短的，agent 直接开工，没走 plan_detour，
+	//     是漂移提醒响了才回头补 —— **"把用户的话直接当指令"这个反射太快了**。
+	if (String(exec.name || "").startsWith("plan_")) planTouched.set(exec.agent, true);
+	if (!shortWarned.has(exec.agent)
+		&& shortTurn.get(exec.agent)
+		&& !planTouched.get(exec.agent)
+		&& exec.name && !READ_ONLY_TOOLS.has(exec.name)) {
+		shortWarned.add(exec.agent);
+		return notice([
+			"🗒【记账提醒】你正在执行用户的**一句短指令**（他上一轮只说了几个字），**但没有先记账**。",
+			"   先问自己一句：这件事属于当前步吗？",
+			"   · 属于 → 继续（这条提醒不用管）",
+			"   · **不属于（是他另外要的活）→ `plan_detour` 记一条**，别让它只活在对话里",
+			"   · 拿不准 → `plan_ask` 或直接问他",
+			"（这条提醒每个会话只出现一次。由来：实测连着两轮把用户的一句话直接当指令动手，",
+			"  两次都是漂移提醒响了才回头补账 —— **\"把用户的话直接当指令\"这个反射太快了**。）"
+		].join("\n"), "bookkeeping nudge");
 	}
 
 	// ⓪ 用户信号：用户叫你停 / 问进度 / 要整理 / 追加需求。

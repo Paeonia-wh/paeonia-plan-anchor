@@ -1217,5 +1217,34 @@ r = await callIn('plan_log', {}, execAS);
 check('（摆证据）批准的**用户原话**进了台账，可核对', r.text.includes('对，先修这个'), r.text.slice(0, 400));
 check('（摆证据）台账里标明了这是第几次紧急批准', r.text.includes('第 1 次'), r.text.slice(0, 400));
 
+console.log(`\n--- 64. 【记账提醒】用户一句短话 + 直接动手 + 没记账 → 提醒一次 ---`);
+const execAT = mkExec('D:\\projAT');
+await callIn('plan_set', { title: 'AT 计划', steps: ['AT1 正在做的一步'] }, execAT);
+// 用户一句短话（典型选项回答）→ 直接动手改文件 → 应提醒
+await userSays(execAT, 'B吧');
+const n1 = await fireIn('write', { file_path: 'at.txt', content: 'x' }, execAT);
+check('（记账提醒）短指令 + 直接动手 → 提醒先记账', noticeText(n1).includes('记账提醒'), noticeText(n1).slice(0, 260));
+check('（记账提醒）给出三条出路（属于/不属于/拿不准）', noticeText(n1).includes('plan_detour') && noticeText(n1).includes('plan_ask'), noticeText(n1).slice(0, 420));
+check('（记账提醒）说明由来（实测连着两轮踩到）', noticeText(n1).includes('反射太快'), noticeText(n1).slice(0, 520));
+// 每个会话只提醒一次
+await userSays(execAT, '继续');
+const n2 = await fireIn('write', { file_path: 'at2.txt', content: 'x' }, execAT);
+check('（记账提醒）同一会话不再重复提醒（免得自己变墙纸）', !noticeText(n2).includes('记账提醒'), noticeText(n2).slice(0, 200));
+// 对照：用户说了长句 → 不提醒
+const execAU = mkExec('D:\\projAU');
+await callIn('plan_set', { title: 'AU 计划', steps: ['AU1 一步'] }, execAU);
+await userSays(execAU, '你把那个日志格式调整一下，另外顺手看看有没有别的地方也不统一，一起改了');
+const n3 = await fireIn('write', { file_path: 'au.txt', content: 'x' }, execAU);
+check('（对照）用户说长句时不做记账提醒（避免误报）', !noticeText(n3).includes('记账提醒'), noticeText(n3).slice(0, 200));
+// 对照：先记账再动手 → 不提醒
+const execAV = mkExec('D:\\projAV');
+await callIn('plan_set', { title: 'AV 计划', steps: ['AV1 一步'] }, execAV);
+await userSays(execAV, '改吧');
+// 注意：必须**走 post-execute 钩子**才算"碰过计划工具" —— callIn 是直接调 execute，不经过钩子，
+// 所以用 fireIn 走一遍（生产里所有工具调用都过钩子，这里只是让测试贴近生产）。
+await fireIn('plan_detour', { text: '给 AV 加个小改动', reason: '用户刚说的' }, execAV);
+const n4 = await fireIn('write', { file_path: 'av.txt', content: 'x' }, execAV);
+check('（对照）先碰过计划工具，就不再提醒', !noticeText(n4).includes('记账提醒'), noticeText(n4).slice(0, 220));
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
