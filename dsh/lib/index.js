@@ -1286,10 +1286,36 @@ function planStepDone(d, args, scope = "", session = "") {
 	}
 	// 【第 8 件】证据 vs 验收：只提醒、不拒绝（判真伪是语义判断，超出硬拦边界）
 	let cueWarn = "";
-	if (cur.acceptance && !evidenceResponds(evidence, cur.acceptance)) {
-		cueWarn = `\n\n⚠ 你写的依据里几乎没有回应验收标准「${cur.acceptance}」的措辞。自查一下：这条验收真的过了吗？拿不准就用 ask_user_question 问用户 —— 别自己拍板。`;
+	// 【注意】必须检查 args.confirm —— 第一版我写了"带 confirm: true 再调一次"，
+	// 但条件里没有它，于是那句话是空头支票（**同一天第三次"说了没做"**）。
+	// 现在：不匹配 → 拦；带 confirm 才放行。
+	if (cur.acceptance && !evidenceResponds(evidence, cur.acceptance) && !args.confirm) {
+		// 【从"警告"升级为"拦"】——为什么升级（实测踩到，而且我当场忽略了警告）：
+		// 我补记一个额外步骤时，焦点已经**自动回到主线**了，于是 plan_step_done
+		// 关掉了**主线的那一步**、还带上了额外步骤的依据 —— **计划状态被静默推进**。
+		// 当时 evidenceResponds 的警告确实打出来了，但我没当回事。
+		// 教训：**"警告不够，得让它拦"** —— 尤其是"关错步骤"这种会污染计划状态的错误。
+		const g = gate([
+			"⛔ **先确认你关的是不是这一步** —— 你写的依据看起来对不上它的验收标准。",
+			"",
+			`   你正在关闭：**${stepLabel(cur)}「${cur.text}」**${cur.kind === "detour" ? "（这是一个**额外步骤**，不是主线步骤）" : ""}`,
+			`   它的验收标准：「${cur.acceptance}」`,
+			`   你写的依据：「${evidence.slice(0, 90)}`,
+			"",
+			"   两种情况：",
+			"   · **关对了**，只是措辞没对上 → 带 `confirm: true` 再调一次",
+			"   · **关错了**（你其实想关别的步骤）→ 先 `plan_goto` 切到那一步，再关它",
+			"",
+			"   （为什么要拦：实测踩过 —— 补记一个额外步骤时，焦点已自动回到主线，",
+			"    于是**关错了步骤、还带上了别的活的依据**，计划状态被静默推进。）"
+		].filter(Boolean).join("\n"));
+		if (g) return g;
+		cueWarn = `\n\n⚠ 你写的依据里几乎没有回应验收标准「${cur.acceptance}」的措辞（你已用 confirm 确认过，放行）。`;
 	}
-	return { ok: true, step_done: cur.id, briefing: anchorText(d, plan, { verdict: tail }) + "\n" + tail + cueWarn };
+	// 【明确回显】第一行就写清"关的是哪一步" —— 不然"关错步骤"根本看不出来。
+	// 实测踩过：回执只说"完成 ✔ / 下一步是第 N 步"，我当时没意识到关的是主线的步而不是额外步骤。
+	const headline = `✔ **已关闭：${stepLabel(cur)}「${cur.text}」${cur.kind === "detour" ? "（额外步骤）" : ""}**`;
+	return { ok: true, step_done: cur.id, briefing: headline + "\n\n" + anchorText(d, plan, { verdict: tail }) + "\n" + tail + cueWarn };
 }
 
 /**
@@ -1696,16 +1722,27 @@ function planReview(d, args, scope = "") {
 	const since = Number(stGet(d, plan.id, "review_since", "0"));
 	if (!since) return { ok: false, reason: "现在没有待确认的完成 —— 完成闸门只在「最后一步做完」时开启。" };
 	const lastUser = Number(stGet(d, plan.id, "last_user_turn", "0"));
-	if (lastUser <= since) {
+	// 【假阴性修复】原来只认"用户消息"，但 **ask_user_question 的回答不走用户消息**
+	// （它是以工具结果回来的）→ 用户明明答了，闸门却说"你没问过"。
+	// 实测踩到：用 ask_user_question 问完并拿到回答后，plan_review 仍被拒。
+	// 修法：允许用 **user_said（抄用户原话）** 作为替代证据 —— 和紧急闸门同一套：
+	// **摆证据，不是自报**（编造一句用户没说过的话，成本高得多，而且会显示给用户看）。
+	const userSaid = (args.user_said || "").trim();
+	if (lastUser <= since && !userSaid) {
 		return {
 			ok: false,
 			reason: [
 				"**你还没问过用户。**",
 				"自你宣布最后一步完成以来，这个会话里**没有任何用户发言** —— 这是可观测事实，不是我的猜测。",
 				"▶ 先用 `ask_user_question` 问：这个计划真的交付了吗？等用户真的回答了，再回来调 plan_review。",
+				"▶ **如果用户是通过 `ask_user_question` 答的**（那种回答不走用户消息，所以这里看不见），",
+				"   就把**他的原话**抄进 `user_said` 再调一次，例如：user_said: \"没完成，先退回第 34 步\"。",
 				"（自始至终禁止的是**静默**：你可以判断完成，但不能不打招呼就替用户拍板。）"
 			].join("\n")
 		};
+	}
+	if (lastUser <= since && userSaid) {
+		log(d, "review_said", { planId: plan.id, ref: "用户原话批准", detail: `（经 ask_user_question）用户原话：「${userSaid}」` });
 	}
 	const note = (args.note || "").trim();
 	const stepId = Number(stGet(d, plan.id, "review_step", "0") || 0);
@@ -2967,10 +3004,11 @@ function apply(ctx, config) {
 		},
 		{
 			name: "plan_review",
-			description: "把「计划算不算完成」交给用户裁：必须先用 ask_user_question 问过用户（自宣布完成以来用户真的回过话），再调本工具。confirmed=false 会把最后一步如实退回未完成。",
+			description: "把「计划算不算完成」交给用户裁：必须先用 ask_user_question 问过用户，再调本工具（用户经 ask_user_question 回答时，把原话抄进 user_said）。confirmed=false 会把最后一步如实退回未完成。",
 			params: {
 				confirmed: { type: "boolean", required: true, description: "用户是否确认完成" },
-				note: { type: "string", description: "用户的原话/意见（confirmed=false 时务必填，会记进台账与步骤证据）" }
+				note: { type: "string", description: "用户的原话/意见（confirmed=false 时务必填，会记进台账与步骤证据）" },
+				user_said: { type: "string", description: "**用户同意/否决的原话**（照抄）。用户通过 ask_user_question 回答时用它 —— 那种回答不走用户消息，闸门看不见；抄原话是摆证据，不是自报。" }
 			},
 			exec: (a, x) => withRefs(d, a, scopeOf(x), planReview, sessionKeyOf(x && x.agent))
 		},

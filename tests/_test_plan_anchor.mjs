@@ -469,7 +469,7 @@ await callIn('plan_set', { title: 'E 的小计划', steps: [
 ]}, execE);
 for (let i = 1; i <= 2; i++) {
   await fireIn('read', { file_path: 'e.js' }, execE);
-  r = await callIn('plan_step_done', { evidence: `E${i} 做完了` }, execE);
+  r = await callIn('plan_step_done', { evidence: `E${i} 做完了`, confirm: true }, execE);
 }
 check('最后一步做完 → 闸门开启，不许自称完成', r.text.includes('计划还不能算完成'), r.text);
 check('并明确要求用 ask_user_question 问用户', r.text.includes('ask_user_question'), r.text);
@@ -932,10 +932,18 @@ for (let i = 0; i < 3; i++) {
 }
 check('（第6件）到期温和 check-in', checkin.includes('静音结束') && checkin.includes('还在计划上吗'), checkin);
 await fireIn('write', { file_path: 'aa.txt', content: 'x' }, execAA);
+// 【设计已变】原来"仍接受但给提醒" —— 实测证明**警告不够**（我当场忽略了它，
+// 结果关错了步骤、计划状态被静默推进）→ 升级为**拦**。下面先验"拦"，再验 confirm 放行。
+// （注意：这里**只调一次**，带 confirm 的那种放在后面 —— 连着调两次会撞上"零工作痕迹"关卡。）
 r = await callIn('plan_step_done', { evidence: '搞定了' }, execAA);
-check('（第8件）依据没回应验收：仍接受但给提醒', !r.refused && r.text.includes('几乎没有回应验收标准'), r.text.slice(-260));
-check('提醒里带上验收原文', r.text.includes('文档包含完整安装步骤且能照做'), r.text.slice(-260));
-check('并建议拿不准就问用户', r.text.includes('ask_user_question'), r.text.slice(-260));
+check('（第8件·已升级）依据没回应验收 → 拦住（不再是"接受但提醒"）', r.refused, r.text.slice(0, 260));
+check('拦住时说清"你正在关闭哪一步"', r.text.includes('你正在关闭'), r.text.slice(0, 320));
+check('拦住时摆出该步的验收原文', r.text.includes('文档包含完整安装步骤且能照做'), r.text.slice(0, 420));
+check('给出两条出路（confirm 放行 / plan_goto 换步子）', r.text.includes('confirm: true') && r.text.includes('plan_goto'), r.text.slice(0, 560));
+await fireIn('write', { file_path: 'aa2.txt', content: 'x' }, execAA);   // 第二次调用前补个工作痕迹（零工作痕迹关卡会拦）
+r = await callIn('plan_step_done', { evidence: '搞定了', confirm: true }, execAA);
+check('（第8件）带 confirm 后放行', !r.refused, r.text.slice(0, 200));
+check('放行后回执**第一行就写明关了哪一步**', r.text.includes('已关闭：'), r.text.slice(0, 160));
 
 console.log(`\n--- 49. 【问用户规则】三档判据 + 铁律 + 熔断负向测试 ---`);
 const execAB = mkExec('D:\\projAB');
