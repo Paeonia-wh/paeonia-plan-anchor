@@ -326,6 +326,26 @@ function noPlanError(hint) {
 	};
 }
 
+/**
+ * 【步骤的称呼】唯一来源 —— 额外步骤**不能**显示它的内部 ord。
+ *
+ * 为什么要有这个函数：额外步骤的 ord 是 `DETOUR_ORD_BASE + N`（10000 + N），
+ * 那是**为了排序**用的内部编号，不是给人看的序号。
+ * 之前有 41 处在各处自己拼「第 <ord> 步」，于是额外步骤一被显示就成了
+ * **「第 10008 步」** —— 实测用户被这个数字吓到过。
+ *
+ * 现在只在这里定义一次：主线显示「第 N 步」，额外步骤显示「额外 N」。
+ */
+function stepLabel(s) {
+	if (!s) return "（没有这一步）";
+	// 【注意】这里**故意用字符串拼接**，不用模板字符串 ——
+	// 因为这个函数的定义本身长得像"要被批量替换的形态"，用模板字符串会被自己的替换规则伤到
+	// （_实测踩过两次_：reasonLine 和 stepLabel 都因为这事变成自递归，直接爆栈）。
+	// 拼接形态对"第 ${X.ord} 步"这类批量替换免疫。
+	if (s.kind === "detour") return "额外 " + s.detour_no;
+	return "第 " + s.ord + " 步";
+}
+
 function planSteps(d, planId) {
 	// 只返回"活着"的**工作**步骤（不含被 drop 的、不含验收步）：总数 n、找下一个待办都该用它
 	// 【为什么要分开】验收步是"请用户看 agent 的表现"，不是要干的活 ——
@@ -406,7 +426,7 @@ function resolveStep(d, plan, args, idKey = "step_id", ordKey = "step_ord") {
 			};
 		}
 	}
-	const map = planSteps(d, plan.id).map((s) => `第${s.ord}步→${s.id}`).join("、");
+	const map = planSteps(d, plan.id).map((s) => `${stepLabel(s)}→${s.id}`).join("、");
 	return {
 		error: [
 			`找不到要引用的步骤（${idKey}=${id || "—"}${ord ? `、${ordKey}=${ord}` : ""}）。`,
@@ -518,7 +538,7 @@ function resumeLabel(d, p) {
 		if (s) {
 			const stale = Number(p.resume_after_ord) && Number(p.resume_after_ord) !== s.ord
 				? `（原来写的是第 ${p.resume_after_ord} 步）` : "";
-			return `主线第 ${s.ord} 步之后${stale}`;
+			return `主线${stepLabel(s)}之后${stale}`;
 		}
 	}
 	return p.resume_after_ord ? `主线第 ${p.resume_after_ord} 步之后` : "";
@@ -805,7 +825,7 @@ function anchorText(d, plan, opts = {}) {
 		const r = resume ? stepById(d, Number(resume)) : null;
 		lines.push(`⚙ 当前在做**额外步骤 ${cur.detour_no}**：${cur.text}`);
 		lines.push(r
-			? `主线第 ${r.ord} 步「${r.text}」已挂起 —— 做完 plan_step_done 会**自动回到主线第 ${r.ord} 步**。`
+			? `主线${stepLabel(r)}「${r.text}」已挂起 —— 做完 plan_step_done 会**自动回到主线${stepLabel(r)}**。`
 			: "主线当前没有挂起的步骤；做完 plan_step_done 会回到主线的下一个待办步。");
 	} else if (cur) {
 		lines.push(`▶ 要做：**${stepCue(cur)}**`);   // stepCue 带「（验收：…）」，别绕过它
@@ -815,7 +835,7 @@ function anchorText(d, plan, opts = {}) {
 
 	const nextPending = steps.find((s) => s.status === "pending" || s.status === "blocked");
 	if (!cur || cur.kind === "detour") {
-		if (nextPending) lines.push(`⏭ 回归后下一步：**主线第 ${nextPending.ord} 步**「${stepCue(nextPending)}」${nextPending.status === "blocked" ? "（此前被标阻塞）" : ""}`);
+		if (nextPending) lines.push(`⏭ 回归后下一步：**主线${stepLabel(nextPending)}**「${stepCue(nextPending)}」${nextPending.status === "blocked" ? "（此前被标阻塞）" : ""}`);
 	}
 
 	if (park.length) {
@@ -965,17 +985,17 @@ function planSet(d, args, scope = "", session = "") {
 				// 只有"真做完"才继承完成状态：做得对不对是语义判断，插件只搬确定的事
 				if (from.status === "done") {
 					d.prepare("UPDATE steps SET status='done', evidence=?, done_at=?, rework_of=0 WHERE id=?")
-						.run(`${from.evidence}\n[继承自旧计划第 ${from.ord} 步]`, from.done_at, target);
-					carriedIn.push(`旧第 ${from.ord} 步「${from.text}」的**完成状态**已继承到新第 ${toIdx} 步`);
+						.run(`${from.evidence}\n[继承自旧计划${stepLabel(from)}]`, from.done_at, target);
+					carriedIn.push(`旧${stepLabel(from)}「${from.text}」的**完成状态**已继承到新第 ${toIdx} 步`);
 				} else {
-					carriedIn.push(`旧第 ${from.ord} 步「${from.text}」→ 新第 ${toIdx} 步（保留关系；旧步当时未完成，所以没有可继承的完成状态）`);
+					carriedIn.push(`旧${stepLabel(from)}「${from.text}」→ 新第 ${toIdx} 步（保留关系；旧步当时未完成，所以没有可继承的完成状态）`);
 				}
 			} else if (rel === "replaced") {
 				// 取代 = 返工：旧的那步产出有问题，新步骤重做它。不继承完成状态，只留显式链接。
 				d.prepare("UPDATE steps SET rework_of=?, status='pending' WHERE id=?").run(from.id, target);
-				reworks.push(`新第 ${toIdx} 步「${stepById(d, target).text}」是**返工**：取代旧第 ${from.ord} 步「${from.text}」${raw.note ? `（${raw.note}）` : ""}`);
+				reworks.push(`新第 ${toIdx} 步「${stepById(d, target).text}」是**返工**：取代旧${stepLabel(from)}「${from.text}」${raw.note ? `（${raw.note}）` : ""}`);
 			} else {
-				carriedIn.push(`旧第 ${from.ord} 步「${from.text}」→ 新第 ${toIdx} 步（关系：${rel === "split" ? "拆分" : "合并"}；**不继承完成状态**，完成与否要重新判定）`);
+				carriedIn.push(`旧${stepLabel(from)}「${from.text}」→ 新第 ${toIdx} 步（关系：${rel === "split" ? "拆分" : "合并"}；**不继承完成状态**，完成与否要重新判定）`);
 			}
 			log(d, "carry", { planId, stepId: target, ref: `${rel} from #${from.id}`, detail: `${from.text} → ${stepById(d, target).text}${raw.note ? `｜${raw.note}` : ""}` });
 		}
@@ -1014,14 +1034,14 @@ function planSet(d, args, scope = "", session = "") {
 			...(reworks.length ? ["🔁 返工（旧的那步产出有问题，新步骤取代它）：", ...reworks.map((x) => `   ${x}`), "   → 返工本身也要有验收标准；做完后**下游步骤若建立在旧产出上，应复查**（拿不准就问用户）。"] : []),
 			...(unMappedDone.length ? [
 				`⚠ **有 ${unMappedDone.length} 步已完成、但没有被任何映射认领**（它们的成果在新计划里没有归属）：`,
-				...unMappedDone.map((s) => `   ✔ 原第${s.ord}步 ${s.text}`),
+				...unMappedDone.map((s) => `   ✔ 原${stepLabel(s)} ${s.text}`),
 				"   → 如果你认这些成果，用 `carry: [{from_step_id, to_index, relation: \"kept\"}]` 显式认领；",
 				"     如果它们**做错了**，用 `relation: \"replaced\"` 声明返工 —— 别让它无声消失。"
 			] : []),
 			...(carryWarnings.length ? ["⚠ 部分映射没生效：", ...carryWarnings.map((x) => `   ${x}`)] : []),
 			...(orphaned.filter((s) => !mappedFrom.has(s.id)).length ? [
 				`⚠ 旧计划还有 ${orphaned.filter((s) => !mappedFrom.has(s.id)).length} 步**没有被任何映射认领**（已认领的不在此列）：`,
-				...orphaned.filter((s) => !mappedFrom.has(s.id)).map((s) => `   ${s.done ? "✔" : "·"} 原第${s.ord}步 ${s.text}`),
+				...orphaned.filter((s) => !mappedFrom.has(s.id)).map((s) => `   ${s.done ? "✔" : "·"} 原${stepLabel(s)} ${s.text}`),
 				"   → 如果你其实只是想**局部调整**（改一步、插一步、删一步），那 plan_set 是错的工具：",
 				"     应该用 `plan_amend`（原地改，编号与历史不变）/ `plan_insert`（插一步，编号顺延）/ `plan_drop`（丢一步）。这三个都不会丢进度。"
 			] : []),
@@ -1071,7 +1091,7 @@ function planStatus(d, args, scope = "") {
 			const ev = s.status === "done" && s.evidence
 				? ` · 依据：${String(s.evidence).replace(/\s+/g, " ").slice(0, 70)}`
 				: "";
-			return `${mark} 主线第${s.ord}步(id=${s.id}) ${stepCue(s)}${s.rework_of ? `〔🔁 返工：取代 #${s.rework_of}〕` : ""}${s.forced ? "〔⚠ 熔断放行〕" : ""}${ev}${staleOrdinalNote(s)}`;
+			return `${mark} 主线${stepLabel(s)}(id=${s.id}) ${stepCue(s)}${s.rework_of ? `〔🔁 返工：取代 #${s.rework_of}〕` : ""}${s.forced ? "〔⚠ 熔断放行〕" : ""}${ev}${staleOrdinalNote(s)}`;
 		}),
 		// 额外步骤独立编号、独立成节：两套编号混在一起就永远说不清"我们到哪了"
 		detours: lineageDetours(d, plan).map((s) => {
@@ -1211,7 +1231,7 @@ function planStepDone(d, args, scope = "", session = "") {
 			} else setCurrent(d, plan.id, null);
 		}
 		tail = back
-			? `额外步骤 ${cur.detour_no} 已完成 ✔（${cur.text}）；**已自动回到主线第 ${back.ord} 步**：「${back.text}」${back.status === "blocked" ? "（此前标为阻塞；若阻塞其实未解除，再 plan_discover(disposition=\"permit\")）" : ""}`
+			? `额外步骤 ${cur.detour_no} 已完成 ✔（${cur.text}）；**已自动回到主线${stepLabel(back)}**：「${back.text}」${back.status === "blocked" ? "（此前标为阻塞；若阻塞其实未解除，再 plan_discover(disposition=\"permit\")）" : ""}`
 			: `额外步骤 ${cur.detour_no} 已完成 ✔；主线已无待办步骤。`;
 	} else {
 		// 完成一个计划步骤 → 偏离额度回血 1 点（额度是预算，不是禁令）
@@ -1220,7 +1240,7 @@ function planStepDone(d, args, scope = "", session = "") {
 		if (next) {
 			d.prepare("UPDATE steps SET status='active', started_at=COALESCE(started_at,?) WHERE id=?").run(now(), next.id);
 			setCurrent(d, plan.id, next.id);
-			tail = `主线第 ${cur.ord} 步完成 ✔${cur.acceptance ? `（对照验收：${cur.acceptance}）` : ""}，下一步 ▶ **主线第 ${next.ord} 步**：「${stepCue(next)}」`
+			tail = `主线${stepLabel(cur)}完成 ✔${cur.acceptance ? `（对照验收：${cur.acceptance}）` : ""}，下一步 ▶ **主线${stepLabel(next)}**：「${stepCue(next)}」`
 				+ (cur.acceptance ? `\n（该步有验收标准 —— 若拿不准是否**真**过了，用 \`ask_user_question\` 让用户确认；判验收是语义判断，别自己拍板。）` : "");
 		} else {
 			setCurrent(d, plan.id, null);
@@ -1232,7 +1252,7 @@ function planStepDone(d, args, scope = "", session = "") {
 				stSet(d, plan.id, "review_since", now());
 				stSet(d, plan.id, "review_step", cur.id);
 				tail = [
-					`最后一步（主线第 ${cur.ord} 步）做完了 —— 但**计划还不能算完成**。`,
+					`最后一步（主线${stepLabel(cur)}）做完了 —— 但**计划还不能算完成**。`,
 					"「算不算交付」是语义判断，不该由我自己拍板。",
 					"▶ 现在就用 `ask_user_question` 问用户：**这个计划真的交付了吗？**",
 					`   把依据一并摆出来${cur.acceptance ? `（该步验收：「${cur.acceptance}」）` : "（该步没写验收标准 —— 这正是值得补的地方）"}。`,
@@ -1375,7 +1395,7 @@ function planDiscover(d, args, scope = "") {
 				`【已判定不做 #${parkId}】${text}`,
 				`理由已记录：${why}`,
 				"这条不进欠账清单（plan_park 默认只列待处理），但记录保留可追溯。",
-				cur ? `▶ 继续第 ${cur.ord} 步：「${cur.text}」` : ""
+				cur ? `▶ 继续${stepLabel(cur)}：「${cur.text}」` : ""
 			].filter(Boolean).join("\n")
 		};
 	}
@@ -1440,12 +1460,12 @@ function planDiscover(d, args, scope = "") {
 			parking_open: open,
 			resume_when: resumeWhen,
 			resume_after_ord: resumeAfterOrd,
-			next_action: cur ? `回到主线第 ${cur.ord} 步：${cur.text}` : "回到当前步骤",
+			next_action: cur ? `回到主线${stepLabel(cur)}：${cur.text}` : "回到当前步骤",
 			briefing: [
 				`【已入泊 #${parkId}】${text}`,
 				`🔄 重启条件已记：${resumeWhen}${resumeAfterOrd ? `（主线第 ${resumeAfterOrd} 步做完时我会主动提醒你）` : ""}`,
 				`泊位现有 ${open} 条未处理。**现在不要处理它** —— 它不阻塞主线第 ${cur ? cur.ord : "?"} 步。`,
-				cur ? `▶ 立刻回到**主线第 ${cur.ord} 步**：「${cur.text}」` : "",
+				cur ? `▶ 立刻回到**主线${stepLabel(cur)}**：「${cur.text}」` : "",
 				"（泊位不会丢：plan_park 随时可查；到期我会把「回程票」举到你眼前。）"
 			].filter(Boolean).join("\n")
 		};
@@ -1476,9 +1496,9 @@ function planDiscover(d, args, scope = "") {
 		detour_step_id: detourId,
 		disposition: "permit",
 		briefing: [
-			`【正式中断】主线第 ${cur.ord} 步「${cur.text}」已标记为 ⛔ 阻塞。`,
+			`【正式中断】主线${stepLabel(cur)}「${cur.text}」已标记为 ⛔ 阻塞。`,
 			`你现在在做**额外步骤 ${dNo}**：${text}`,
-			`做完之后 plan_step_done（写 evidence）会自动把你送回**主线第 ${cur.ord} 步** —— 不需要你记得回来。`
+			`做完之后 plan_step_done（写 evidence）会自动把你送回**主线${stepLabel(cur)}** —— 不需要你记得回来。`
 		].join("\n")
 	};
 }
@@ -1518,7 +1538,7 @@ function planGoto(d, args, scope = "") {
 			briefing: [
 				`【已提取${parkLabel(d, p)} → 记为额外步骤 ${dNo}】${p.text}`,
 				reasonLine(reason),
-				cur && cur.kind === "plan" ? `主线第 ${cur.ord} 步「${cur.text}」已挂起，做完 plan_step_done 会**自动回到主线第 ${cur.ord} 步**。` : "",
+				cur && cur.kind === "plan" ? `主线${stepLabel(cur)}「${cur.text}」已挂起，做完 plan_step_done 会**自动回到主线${stepLabel(cur)}**。` : "",
 				"...but 提醒：这是**计划外的工作**，台账已留痕。",
 				over ? `⚠ 偏离额度已超支（第 ${detourUsed(d, plan.id)} 次 / 额度 ${detourBudget}）。不禁止你继续，但这笔代价会一直显示在锚上，直到你完成一个计划步骤。` : `偏离额度：${detourUsed(d, plan.id)}/${detourBudget}。`
 			].filter(Boolean).join("\n")
@@ -1528,8 +1548,8 @@ function planGoto(d, args, scope = "") {
 	if (args.step_id) {
 		const s = stepById(d, Number(args.step_id));
 		if (!s || s.plan_id !== plan.id || s.kind !== "plan") return { ok: false, reason: `计划步骤 #${args.step_id} 不存在` };
-		if (s.status === "done") return { ok: false, reason: `第 ${s.ord} 步已完成，不需要重做（要重做请 plan_amend 或 plan_insert 加一步）` };
-		if (s.status === "dropped") return { ok: false, reason: `第 ${s.ord} 步已被丢弃，不能切到它（要恢复请 plan_insert 重新加一步）` };
+		if (s.status === "done") return { ok: false, reason: `${stepLabel(s)}已完成，不需要重做（要重做请 plan_amend 或 plan_insert 加一步）` };
+		if (s.status === "dropped") return { ok: false, reason: `${stepLabel(s)}已被丢弃，不能切到它（要恢复请 plan_insert 重新加一步）` };
 		if (cur && cur.id !== s.id) {
 			if (cur.kind === "plan") {
 				d.prepare("UPDATE steps SET status='pending' WHERE id=?").run(cur.id);
@@ -1546,7 +1566,7 @@ function planGoto(d, args, scope = "") {
 		setCurrent(d, plan.id, s.id);
 		setBudget(d, plan.id, 0);
 		log(d, "goto_step", { planId: plan.id, stepId: s.id, detail: reason });
-		return { ok: true, step_id: s.id, briefing: anchorText(d, plan, { verdict: `焦点已切到第 ${s.ord} 步（理由：${reason}）` }) };
+		return { ok: true, step_id: s.id, briefing: anchorText(d, plan, { verdict: `焦点已切到${stepLabel(s)}（理由：${reason}）` }) };
 	}
 
 	return { ok: false, reason: "必须给 step_id 或 park_id 之一" };
@@ -1564,7 +1584,7 @@ function planPark(d, args, scope = "") {
 	const PARK_CN = { parked: "待处理", escalated: "偏离处理中", done: "已完成", declined: "已判定不做" };
 	const lines = rows.map((p) => {
 		const step = p.from_step ? stepById(d, p.from_step) : null;
-		const where = step ? `第 ${step.ord} 步时发现` : "计划外发现";
+		const where = step ? `${stepLabel(step)}时发现` : "计划外发现";
 		const st = PARK_CN[p.status] || p.status;
 		const why = p.status === "declined" && p.note ? `｜不做理由：${p.note.slice(0, 60)}` : "";
 		const back = p.status === "parked" && p.resume_when
@@ -1641,7 +1661,7 @@ function planLog(d, args, scope = "") {
 	const lines = rows.map((r) => {
 		const t = new Date(r.ts).toISOString().slice(11, 19);
 		const s = r.step_id ? stepById(d, r.step_id) : null;
-		const loc = s ? (s.kind === "detour" ? `额外步骤${s.detour_no}` : `主线第${s.ord}步`) : "";
+		const loc = s ? (s.kind === "detour" ? `额外步骤${s.detour_no}` : `主线${stepLabel(s)}`) : "";
 		return `- ${t} ${KIND_CN[r.kind] || r.kind} ${loc} ${r.ref} ${r.detail ? "· " + r.detail.slice(0, 80) : ""}`.trim();
 	});
 	return { ok: true, count: rows.length, briefing: ["漂移台账（最近 " + rows.length + " 条，倒序" + (all ? "，全部项目" : `，仅本计划`) + "）", ...lines].join("\n") };
@@ -1696,7 +1716,7 @@ function planReview(d, args, scope = "") {
 		ok: true,
 		briefing: [
 			`【用户判定：没完成】${note}`,
-			s ? `主线第 ${s.ord} 步「${s.text}」已**退回未完成**，焦点回到它。` : "",
+			s ? `主线${stepLabel(s)}「${s.text}」已**退回未完成**，焦点回到它。` : "",
 			"▶ 把用户的意见变成行动：要改计划 → plan_set（带 reason）；它是个新问题 → plan_discover 判定处置。别只是嘴上改口。"
 		].filter(Boolean).join("\n")
 	};
@@ -1772,7 +1792,7 @@ function planAmend(d, args, scope = "") {
 	if (!plan) return { ok: false, reason: "当前项目没有生效计划" };
 	const s = stepById(d, Number(args.step_id));
 	if (!s || s.plan_id !== plan.id) return { ok: false, reason: `步骤 #${args.step_id} 不属于当前计划` };
-	if (s.status === "dropped") return { ok: false, reason: `主线第 ${s.ord} 步已被丢弃，改它没有意义` };
+	if (s.status === "dropped") return { ok: false, reason: `主线${stepLabel(s)}已被丢弃，改它没有意义` };
 	const reason = (args.reason || "").trim();
 	if (!reason) {
 		return {
@@ -1800,15 +1820,15 @@ function planAmend(d, args, scope = "") {
 		const c = JSON.stringify((Array.isArray(args.commands) ? args.commands : []).map((x) => String(x)));
 		if (c !== s.scope_commands) { changes.push(`允许跑的命令：→ ${c}`); next.scope_commands = c; }
 	}
-	if (!changes.length) return { ok: true, briefing: `主线第 ${s.ord} 步没有任何变化（你没给要改的字段）。` };
+	if (!changes.length) return { ok: true, briefing: `主线${stepLabel(s)}没有任何变化（你没给要改的字段）。` };
 	d.prepare("UPDATE steps SET text=?, acceptance=?, scope_files=?, scope_commands=? WHERE id=?")
 		.run(next.text, next.acceptance, next.scope_files, next.scope_commands, s.id);
-	log(d, "amend", { planId: plan.id, stepId: s.id, ref: `主线第${s.ord}步`, detail: `${changes.join("；")}｜理由：${reason}` });
+	log(d, "amend", { planId: plan.id, stepId: s.id, ref: `主线${stepLabel(s)}`, detail: `${changes.join("；")}｜理由：${reason}` });
 	return {
 		ok: true,
 		step_id: s.id,
 		briefing: [
-			`【已修订】主线第 ${s.ord} 步（**编号未变、身份未变、历史保留**${s.status === "done" ? "；注意这步已完成，改的是记录" : ""}）`,
+			`【已修订】主线${stepLabel(s)}（**编号未变、身份未变、历史保留**${s.status === "done" ? "；注意这步已完成，改的是记录" : ""}）`,
 			...changes.map((c) => `- ${c}`),
 			reasonLine(reason)
 		].join("\n")
@@ -1826,7 +1846,7 @@ function planInsert(d, args, scope = "") {
 	if (afterId) {
 		const a = stepById(d, afterId);
 		if (!a || a.plan_id !== plan.id) return { ok: false, reason: `步骤 #${afterId} 不属于当前计划` };
-		if (a.status === "dropped") return { ok: false, reason: `主线第 ${a.ord} 步已被丢弃，不能在它后面插入` };
+		if (a.status === "dropped") return { ok: false, reason: `主线${stepLabel(a)}已被丢弃，不能在它后面插入` };
 		afterOrd = a.ord;
 	}
 	const parsed = parseStepList(args.steps);
@@ -1885,14 +1905,14 @@ function planDrop(d, args, scope = "") {
 	if (!plan) return { ok: false, reason: "当前项目没有生效计划" };
 	const s = stepById(d, Number(args.step_id));
 	if (!s || s.plan_id !== plan.id) return { ok: false, reason: `步骤 #${args.step_id} 不属于当前计划` };
-	if (s.status === "dropped") return { ok: false, reason: `主线第 ${s.ord} 步已经被丢弃过了` };
+	if (s.status === "dropped") return { ok: false, reason: `主线${stepLabel(s)}已经被丢弃过了` };
 	// 已完成区冻结（对齐 Camunda：迁移只改"未执行的部分"，已完成的活动原封不动）：
 	// 允许 drop 一个已完成的步骤 = 把真实做过的工作从计数里抹掉，那不是"改计划"，是抹账。
 	if (s.status === "done") {
 		return {
 			ok: false,
 			reason: [
-				`主线第 ${s.ord} 步**已完成**，不能丢弃 —— 已完成的部分是历史，不是可以随手改的草稿。`,
+				`主线${stepLabel(s)}**已完成**，不能丢弃 —— 已完成的部分是历史，不是可以随手改的草稿。`,
 				"（对齐 Camunda 的做法：迁移只改「未执行的部分」，已完成的活动原封不动。）",
 				"要修正它的记录（比如文字写错了）→ `plan_amend`；要整体重来 → `plan_set`（换计划）。"
 			].join("\n"),
@@ -1911,17 +1931,17 @@ function planDrop(d, args, scope = "") {
 		const after = planSteps(d, plan.id).find((x) => x.status !== "done");
 		setCurrent(d, plan.id, after ? after.id : null);
 		focusMsg = after
-			? `它原本是当前步 → 焦点已**顺延到主线第 ${after.ord} 步**：「${after.text}」`
+			? `它原本是当前步 → 焦点已**顺延到主线${stepLabel(after)}**：「${after.text}」`
 			: "它原本是当前步 → 计划里已没有待办，焦点清空。";
 	}
 	const moved = renumber(d, plan.id);
-	const note = `丢弃了原主线第 ${s.ord} 步「${s.text}」${moved.length ? `；编号收拢：${moved.join("，")}` : ""}`;
-	log(d, "drop", { planId: plan.id, stepId: s.id, ref: `原第${s.ord}步`, detail: `${note}｜理由：${reason}` });
+	const note = `丢弃了原主线${stepLabel(s)}「${s.text}」${moved.length ? `；编号收拢：${moved.join("，")}` : ""}`;
+	log(d, "drop", { planId: plan.id, stepId: s.id, ref: `原${stepLabel(s)}`, detail: `${note}｜理由：${reason}` });
 	setRevisionNote(d, plan.id, note);
 	return {
 		ok: true,
 		briefing: [
-			`【已丢弃】原主线第 ${s.ord} 步「${s.text}」`,
+			`【已丢弃】原主线${stepLabel(s)}「${s.text}」`,
 			focusMsg,
 			moved.length ? `⚠ 编号已收拢：${moved.join("，")}（步骤身份与完成状态跟着 id 走）` : "",
 			reasonLine(reason),
@@ -1946,7 +1966,7 @@ function planRework(d, args, scope = "") {
 	const target = stepById(d, Number(args.step_id));
 	if (!target || target.plan_id !== plan.id) return { ok: false, reason: `步骤 #${args.step_id} 不属于当前计划` };
 	if (target.kind !== "plan") return { ok: false, reason: "只能对**主线步骤**开返工" };
-	if (target.status === "dropped") return { ok: false, reason: `主线第 ${target.ord} 步已被丢弃，返工它没有意义` };
+	if (target.status === "dropped") return { ok: false, reason: `主线${stepLabel(target)}已被丢弃，返工它没有意义` };
 	const reason = (args.reason || "").trim();
 	if (!reason) {
 		return {
@@ -1955,7 +1975,7 @@ function planRework(d, args, scope = "") {
 			briefing: anchorText(d, plan)
 		};
 	}
-	const text = (args.text || "").trim() || `重做第 ${target.ord} 步：${target.text}`;
+	const text = (args.text || "").trim() || `重做${stepLabel(target)}：${target.text}`;
 	const acceptance = (args.acceptance || "").trim();
 	const cur = currentStep(d, plan.id);
 
@@ -1973,16 +1993,16 @@ function planRework(d, args, scope = "") {
 	}
 	setCurrent(d, plan.id, rid);
 	setBudget(d, plan.id, 0);
-	log(d, "rework", { planId: plan.id, stepId: rid, ref: `取代 #${target.id}`, detail: `返工主线第 ${target.ord} 步「${target.text}」｜理由：${reason}` });
+	log(d, "rework", { planId: plan.id, stepId: rid, ref: `取代 #${target.id}`, detail: `返工主线${stepLabel(target)}「${target.text}」｜理由：${reason}` });
 	const down = planSteps(d, plan.id).filter((s) => s.ord > target.ord);
 	return {
 		ok: true,
 		rework_step_id: rid,
 		briefing: [
 			`【已开返工】记为**额外步骤 ${dNo}**：${text}`,
-			`它取代的是主线第 ${target.ord} 步「${target.text}」${target.status === "done" ? "（该步之前标为已完成 —— 已完成区不删除、不篡改，只是**被取代**）" : ""}`,
+			`它取代的是主线${stepLabel(target)}「${target.text}」${target.status === "done" ? "（该步之前标为已完成 —— 已完成区不删除、不篡改，只是**被取代**）" : ""}`,
 			reasonLine(reason),
-			cur && cur.kind === "plan" && cur.id !== target.id ? `主线第 ${cur.ord} 步「${cur.text}」已挂起 —— 返工做完 plan_step_done 会**自动回到它**。` : "",
+			cur && cur.kind === "plan" && cur.id !== target.id ? `主线${stepLabel(cur)}「${cur.text}」已挂起 —— 返工做完 plan_step_done 会**自动回到它**。` : "",
 			down.length ? `⚠ 下游有 ${down.length} 步建立在它之上（第 ${down.map((s) => s.ord).join("、")} 步）—— 返工完成后**该复查下游**；拿不准要不要重做，用 ask_user_question 问用户。` : "",
 			"（返工不计入偏离额度：这是纠错，不是跑偏。）"
 		].filter(Boolean).join("\n")
@@ -2045,7 +2065,7 @@ function planNote(d, args, scope = "", session = "") {
 		ok: true,
 		briefing: [
 			`【在轨声明已记录】${text}`,
-			`漂移预算已清零（原 ${Math.round(before * 10) / 10}）${cur ? `；当前仍在主线第 ${cur.ord} 步「${cur.text}」` : ""}。`,
+			`漂移预算已清零（原 ${Math.round(before * 10) / 10}）${cur ? `；当前仍在主线${stepLabel(cur)}「${cur.text}」` : ""}。`,
 			"（台账记的是「自称在轨」—— 它与「真的完成」是两回事；真做完请 plan_step_done。）"
 		].join("\n")
 	};
@@ -2291,14 +2311,14 @@ function planDetour(d, args, scope = "", session = "") {
 	}
 	setCurrent(d, plan.id, rid);
 	setBudget(d, plan.id, 0);
-	log(d, "detour", { planId: plan.id, stepId: rid, ref: `额外 ${dNo}`, detail: `${text}${reason ? `｜因为：${reason}` : ""}`, session });
+	log(d, "detour", { planId: plan.id, stepId: rid, ref: `额外步骤 ${dNo}`, detail: `${text}${reason ? `｜因为：${reason}` : ""}`, session });
 	return {
 		ok: true,
 		detour_no: dNo,
 		briefing: [
 			`【已开一条额外步骤 ${dNo}】${text}`,
 			reason ? reasonLine(reason) : "",
-			cur && cur.kind === "plan" ? `主线第 ${cur.ord} 步「${cur.text}」已挂起 —— 做完这条 plan_step_done 会**自动回到它**。` : "",
+			cur && cur.kind === "plan" ? `主线${stepLabel(cur)}「${cur.text}」已挂起 —— 做完这条 plan_step_done 会**自动回到它**。` : "",
 			"（额外步骤**不计偏离额度**：它是「要做的活」，不是「跑偏」。主线仍然是主线，它只是岔出去的一条。）"
 		].filter(Boolean).join("\n")
 	};
@@ -2484,7 +2504,7 @@ function turnAnchorNotice(d, scope = "") {
 		const _m = planInflation(d, plan.id);
 		const _inflate = _m && !(_m.birth === _m.now && _m.kept === _m.birth) ? `｜📈 膨胀 ${Math.round(_m.inflate * 100)}%` : "";
 		return notice(
-			`⏸【计划锚】在等：${wWhat}｜等到：${wUntil}｜第 ${wn}/${wlim} 回合${cur ? `｜（第 ${cur.ord} 步挂着）` : ""}${_inflate}`,
+			`⏸【计划锚】在等：${wWhat}｜等到：${wUntil}｜第 ${wn}/${wlim} 回合${cur ? `｜（${stepLabel(cur)}挂着）` : ""}${_inflate}`,
 			"plan anchor (waiting)"
 		);
 	}
@@ -2507,7 +2527,7 @@ function turnAnchorNotice(d, scope = "") {
 			stSet(d, plan.id, "anchor_ack_age", String(age));
 			if (age <= ANCHOR_ACK_TTL) {
 				// 豁免期内：**锚仍在**（闭嘴≠消失），只是不追问，并如实标出还剩几回合
-				const tail = cur ? `｜第 ${cur.ord} 步` : "";
+				const tail = cur ? `｜${stepLabel(cur)}` : "";
 				return notice(
 					`【计划锚】${plan.title}｜${doneN}/${steps.length} 步${tail}${park ? `｜泊位 ${park}` : ""}（已声明在轨 · 豁免第 ${age}/${ANCHOR_ACK_TTL} 回合）`,
 					"plan anchor (acked)"
@@ -2522,7 +2542,7 @@ function turnAnchorNotice(d, scope = "") {
 			return notice([
 				`⚠【计划锚】**你声明「在轨」已经 ${age} 回合了，但计划一步没动。**`,
 				complianceLine(d, plan.id),
-				cur ? `   还停在第 ${cur.ord} 步「${cur.text}」（主线 ${doneN}/${steps.length}）` : `   主线无进行中步骤（${doneN}/${steps.length}）`,
+				cur ? `   还停在${stepLabel(cur)}「${cur.text}」（主线 ${doneN}/${steps.length}）` : `   主线无进行中步骤（${doneN}/${steps.length}）`,
 				"",
 				"三种可能，选一个说清楚：",
 				"  · **这一步其实不该这么做** → `plan_amend` 改它 / `plan_drop` 丢掉 / `plan_set` 换计划",
@@ -2538,7 +2558,7 @@ function turnAnchorNotice(d, scope = "") {
 		return notice([
 			`⚠【计划锚】**计划已经 ${n} 回合没有任何变化** —— 还停在这里：`,
 			complianceLine(d, plan.id),
-			cur ? `   第 ${cur.ord} 步「${cur.text}」（主线 ${doneN}/${steps.length}）` : `   主线无进行中步骤（${doneN}/${steps.length}）`,
+			cur ? `   ${stepLabel(cur)}「${cur.text}」（主线 ${doneN}/${steps.length}）` : `   主线无进行中步骤（${doneN}/${steps.length}）`,
 			park ? `   另有 ${park} 条欠账挂着。` : "",
 			"这是**真的在推进**，还是**卡住了**？四选一：",
 			"  · 在推进**这一步** → `plan_note` 说一句进展（预算清零）",
@@ -2562,7 +2582,7 @@ function turnAnchorNotice(d, scope = "") {
 	if (cur && cur.kind === "detour") {
 		const r = stGet(d, plan.id, "resume_step");
 		const rs = r ? stepById(d, Number(r)) : null;
-		bits.push(`在做额外步骤 ${cur.detour_no}：${cur.text}${rs ? `（主线第 ${rs.ord} 步已挂起）` : ""}`);
+		bits.push(`在做额外步骤 ${cur.detour_no}：${cur.text}${rs ? `（主线${stepLabel(rs)}已挂起）` : ""}`);
 	} else if (cur) {
 		bits.push(`要做：${stepCue(cur)}`);   // stepCue 会带上「（验收：…）」—— 别绕过它
 	} else {
@@ -2629,7 +2649,7 @@ function newWorkNotice(d, plan, toolName) {
 	if (!cur) return null;
 	if (stGet(d, plan.id, "newwork_fired") === String(cur.id)) return null;
 	stSet(d, plan.id, "newwork_fired", String(cur.id));
-	const label = cur.kind === "detour" ? `**额外步骤 ${cur.detour_no}**「${cur.text}」` : `**主线第 ${cur.ord} 步**「${cur.text}」`;
+	const label = cur.kind === "detour" ? `**额外步骤 ${cur.detour_no}**「${cur.text}」` : `**主线${stepLabel(cur)}**「${cur.text}」`;
 	return notice([
 		`【计划锚】你正在做${label}，却调用了 \`${toolName}\` 开了一项新活。`,
 		"如果这来自执行中冒出的新问题：先 plan_discover 显式判定（permit/defer/decline），再决定要不要现在做。",
@@ -2755,8 +2775,8 @@ function progressBriefing(d, plan) {
 	const rev = revisionNote(d, plan.id);
 	if (rev) lines.push(`⚠ 计划刚修订过：${rev}`);
 	lines.push(`计划：《${plan.title}》 ${progressText(done.length, steps.length)}`);
-	lines.push(cur ? `当前在：第 ${cur.ord} 步「${cur.text}」` : "当前没有进行中的步骤");
-	lines.push(done.length ? `已完成：${done.map((s) => `第${s.ord}步「${s.text}」`).join("；")}` : "已完成：无");
+	lines.push(cur ? `当前在：${stepLabel(cur)}「${cur.text}」` : "当前没有进行中的步骤");
+	lines.push(done.length ? `已完成：${done.map((s) => `${stepLabel(s)}「${s.text}」`).join("；")}` : "已完成：无");
 	// 额外步骤（跨修订连续）也要报 —— 这是"两套编号"的另一半，不能被漏掉
 	const dts = lineageDetours(d, plan);
 	if (dts.length) {
@@ -3182,7 +3202,7 @@ function observe(d, exec) {
 			if (scopeMode === "advise" && v.verdict === "out-of-scope" && stGet(d, planId, "scope_nudged") !== String(cs.id)) {
 				stSet(d, planId, "scope_nudged", String(cs.id));
 				scopeNotice = notice([
-					`【计划锚 · scope 观察】当前是主线第 ${cs.ord} 步「${cs.text}」，你动了 scope 之外的东西：`,
+					`【计划锚 · scope 观察】当前是主线${stepLabel(cs)}「${cs.text}」，你动了 scope 之外的东西：`,
 					`- 工具 ${toolName}　- 目标 ${v.target}`,
 					`该步声明允许动：${[...parseList(cs.scope_files), ...parseList(cs.scope_commands)].join("、") || "（无）"}`,
 					"先确认一句：这是本步必需的吗？如果不是 → plan_discover 判定处置；如果确实必需 → plan_goto/plan_set 把 scope 改对，别硬做。",
@@ -3263,7 +3283,7 @@ function observe(d, exec) {
 			return notice([
 				"【静音结束】刚才那段安静时间用完了 —— 这不是提醒你跑偏，是确认一下方向。",
 				"一句话回答两件事：① 那段时间你完成了什么？② 你还在计划上吗？",
-				cs2 ? `（记录里你停在主线第 ${cs2.ord} 步「${cs2.text}」—— 如果实际不在这上面，那现在就是归位的时候。）` : ""
+				cs2 ? `（记录里你停在主线${stepLabel(cs2)}「${cs2.text}」—— 如果实际不在这上面，那现在就是归位的时候。）` : ""
 			].filter(Boolean).join("\n"), "mute expired check-in");
 		}
 		return null;
