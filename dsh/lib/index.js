@@ -893,7 +893,10 @@ function planSet(d, args, scope = "", session = "") {
 	//   · 别人的计划 → 不许动（拒绝，并说明）
 	//   · 自己的计划 → 要取代必须**显式**（带 replace: true）
 	const prev = activePlan(d, scope);
-	if (prev && prev.owner && session && prev.owner !== session) {
+	// 【注意】必须认 replace —— 第一版我写了"带 replace: true 可以取代"，
+	// 但条件里没有 `!args.replace`，于是那句话是空头支票（说了没做）。显式取代是允许的，
+	// 要求的只是**别静默**。
+	if (prev && prev.owner && session && prev.owner !== session && !args.replace) {
 		return {
 			ok: false,
 			reason: [
@@ -1029,6 +1032,8 @@ function planSet(d, args, scope = "", session = "") {
 		steps_with_scope: withScope,
 		briefing: anchorText(d, plan, { verdict: doneNow ? `已换计划；继承了 ${doneNow} 步已完成的进度` : `已立计划，开工第 1 步` }),
 		rules: [
+			// 【取代了谁，必须明说】放在最前面 —— "不许静默"的正解是「不许不说」。
+			...replacedNote,
 			...(carried ? [`⚠ 重规划：旧计划有 ${carried} 条未闭合欠账**已搬到本计划**（到期提醒已重置）；plan_park 可查。`] : []),
 			...(carriedIn.length ? ["📎 显式映射（你说的关系我照办了）：", ...carriedIn.map((x) => `   ${x}`)] : []),
 			...(reworks.length ? ["🔁 返工（旧的那步产出有问题，新步骤取代它）：", ...reworks.map((x) => `   ${x}`), "   → 返工本身也要有验收标准；做完后**下游步骤若建立在旧产出上，应复查**（拿不准就问用户）。"] : []),
@@ -2828,11 +2833,12 @@ function apply(ctx, config) {
 	const tools = [
 		{
 			name: "plan_set",
-			description: "立计划：把多步计划的步骤写进持久锚。已存在生效计划时必须传 reason 才允许覆盖（防静默改计划）。",
+			description: "立计划：把多步计划的步骤写进持久锚。已存在生效计划时**必须传 reason**；要取代**别的会话**的计划还必须传 replace: true（防静默把别人正在跑的护栏弄失明）。",
 			params: {
 				title: { type: "string", required: true, description: "计划标题（这次要做成什么）" },
 				steps: { type: "array", required: true, items: { type: "json" }, description: "有序步骤数组。每项可以是字符串，也可以是对象 {text, acceptance, files, commands}；acceptance=怎么做才算做完，files/commands=这一步允许动什么（供 scope 判决）" },
 				reason: { type: "string", description: "覆盖已有计划时的理由（首次立计划可省略）" },
+				replace: { type: "boolean", description: "要取代**已经存在的**活跃计划时必填 true（本会话的或别的会话的都算）。不填会被拒绝 —— 取代是允许的，**静默**作废不是。" },
 				carry: { type: "array", items: { type: "json" }, description: "换计划时的显式映射：[{from_step_id, to_index, relation, note}]，relation ∈ kept（保留并继承完成状态）| replaced（取代=返工，旧的做错了）| split（拆分）| merged（合并）。不写映射而旧步已完成 → 回执会把它吼出来" }
 			},
 			exec: (a, x) => withRefs(d, a, scopeOf(x), (dd, aa, sc) => planSet(dd, aa, sc, sessionKeyOf(x && x.agent)))

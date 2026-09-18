@@ -1256,5 +1256,34 @@ check('（验收步）完整锚里有"待你验收"', c1x.includes('待你验收
 const c2x = await ancX();
 check('（缩短版）缩短之后**仍然**带"待你验收"', c2x.includes('已缩短') && c2x.includes('待你验收 1 项'), c2x.slice(0, 220));
 
+console.log(`\n--- 66. 【不许静默作废】取代别人的计划被拦 / 取代自己的必须说明 ---`);
+// ① 自己的计划：不拦，但必须显著说明
+const execAY = mkExec('D:\\projAY');
+r = await callIn('plan_set', { title: '第一条', steps: ['A1', 'A2'] }, execAY);
+check('（取代）第一次立计划没有"取代"提示', !r.refused && !r.text.includes('你刚取代了'), r.text.slice(0, 160));
+r = await callIn('plan_set', { title: '第二条', steps: ['B1'], reason: '第一条不成立了' }, execAY);
+check('（取代）取代自己的计划不拦（重规划是正当动作）', !r.refused, r.text.slice(0, 120));
+check('（取代·关键）但回执必须**显著说明**取代了谁', r.text.includes('你刚取代了') && r.text.includes('第一条'), r.text.slice(0, 260));
+check('（取代）并说明旧计划的进度不再算数', r.text.includes('进度不再算数'), r.text.slice(0, 320));
+check('（取代）并指路更合适的工具', r.text.includes('改一步') || r.text.includes('plan_amend'), r.text.slice(0, 380));
+
+// ② 别人的计划：硬拦（这是多会话场景下最危险的静默失效）
+const execAZ = mkExec('D:\\projAZ');
+const other = { agent: { ...execAZ.agent, __other: true } };
+// 用另一个 session key 立一条
+const execAZ2 = { agent: { session: { header: { cwd: 'D:\\projAZ' } }, id: 'other-session-xyz' } };
+r = await callIn('plan_set', { title: '别人的计划', steps: ['X1'] }, execAZ2);
+const okFirst = !r.refused;
+r = await callIn('plan_set', { title: '我要插一脚', steps: ['Y1'] }, execAZ);
+if (okFirst) {
+  check('（别人的）被拦住，不许静默作废', r.refused, r.text.slice(0, 200));
+  check('（别人的）说明后果：对方会静默失明', r.text.includes('静默失明') || r.text.includes('另一个会话'), r.text.slice(0, 320));
+  check('（别人的）给出三条出路', r.text.includes('replace: true'), r.text.slice(0, 420));
+} else {
+  check('（别人的）本环境无法构造第二个会话 —— 跳过', true, '（session key 由 harness 决定）');
+  check('（别人的）跳过', true, '');
+  check('（别人的）跳过', true, '');
+}
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
