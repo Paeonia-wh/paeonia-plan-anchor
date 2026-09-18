@@ -977,6 +977,21 @@ function planStatus(d, args, scope = "") {
 			"",
 			"主线步骤：",
 			...detail.step_map.map((l) => "  " + l),
+			// 【等待态】必须在这里也显示 —— 否则用户问"做到哪了"时看不出它在等（信息存在≠可见）
+			...(() => {
+				const w = stGet(d, plan.id, "waiting_what", "");
+				if (!w) return [];
+				const wn = stGet(d, plan.id, "waiting_turns", "0");
+				const wl = stGet(d, plan.id, "waiting_limit", "8");
+				return ["", `⏸ **在等**：${w}｜等到：${stGet(d, plan.id, "waiting_until", "")}｜第 ${wn}/${wl} 回合`,
+					`   超时之后 → ${stGet(d, plan.id, "waiting_timeout", "")}`];
+			})(),
+			// 【计划膨胀】论文（arXiv 2604.12147）实测：早期插入额外阶段可能反而降低表现 → 这个数字必须看得见
+			...(() => {
+				const b = Number(stGet(d, plan.id, "birth_steps", "0"));
+				const tot = planSteps(d, plan.id).length;
+				return b && tot > b ? [`📈 计划已从 ${b} 步长到 ${tot} 步（后加 ${tot - b}）—— 论文实测：早期插入额外阶段可能反而拖低表现`] : [];
+			})(),
 			...(detail.detours.length ? ["", "额外步骤（从主线岔出去的工作，独立编号，跨修订连续）：", ...detail.detours.map((l) => "  " + l)] : []),
 			...(detail.revisions.length ? ["", "计划修订史（最近 5 次）：", ...detail.revisions.map((r) => {
 				const t = new Date(r.ts).toISOString().slice(11, 19);
@@ -2225,8 +2240,10 @@ function turnAnchorNotice(d, scope = "") {
 			].join("\n"), "plan anchor (wait timed out)");
 		}
 		stSet(d, plan.id, "waiting_turns", String(wn));
+		const _b = Number(stGet(d, plan.id, "birth_steps", "0"));
+		const _inflate = _b && steps.length > _b ? `｜📈 计划 ${_b}→${steps.length} 步` : "";
 		return notice(
-			`⏸【计划锚】在等：${wWhat}｜等到：${wUntil}｜第 ${wn}/${wlim} 回合${cur ? `｜（第 ${cur.ord} 步挂着）` : ""}`,
+			`⏸【计划锚】在等：${wWhat}｜等到：${wUntil}｜第 ${wn}/${wlim} 回合${cur ? `｜（第 ${cur.ord} 步挂着）` : ""}${_inflate}`,
 			"plan anchor (waiting)"
 		);
 	}
@@ -2878,7 +2895,11 @@ function observe(d, exec) {
 	else if (!toolName.startsWith(NEUTRAL_PREFIX)) {
 		// 【批2-C】只读工具算**半次**：一次合法的长调研（连读十几个文件做参考）不该等价于"写了十几次"；
 		// 但也不能算 0 —— 真跑偏时同样经常是"读个不停"，所以是折中的半次。
-		setBudget(d, planId, budget(d, planId) + (READ_ONLY_TOOLS.has(toolName) ? 0.5 : 1));
+		// 【等待期间不涨预算】—— 四处文案都写着"等外部不是你的错"，那代码里就得**真的**不涨。
+		// （之前只写在描述里没落到代码，是"说了没做"。）
+		if (!stGet(d, planId, "waiting_what", "")) {
+			setBudget(d, planId, budget(d, planId) + (READ_ONLY_TOOLS.has(toolName) ? 0.5 : 1));
+		}
 		stSet(d, planId, "step_calls", workTrace(d, planId).calls + 1); // 本步工作痕迹（I9 判据之一）
 	}
 

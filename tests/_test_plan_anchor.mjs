@@ -1176,5 +1176,19 @@ await userSays(execAQ, '继续');
 const z6 = noticeText(await fireIn('read', { file_path: 'aq2.js' }, execAQ));
 check('（膨胀）锚显示"计划已从 1 步长到 3 步"', z6.includes('计划已从 1 步长到 3 步'), z6.slice(0, 220));
 
+console.log(`\n--- 62. 【说了没做】等待期间真的不涨预算 + 等待态/膨胀在 plan_status 里可见 ---`);
+const execAR = mkExec('D:\\projAR');
+await callIn('plan_set', { title: 'AR 计划', steps: ['AR1', 'AR2'] }, execAR);
+await callIn('plan_wait', { what: '等外部 API 返回', until: 'API 返回 200', on_timeout: '改用缓存', timeout_turns: 20 }, execAR);
+// 连续 10 次工具调用 —— 预算**必须**纹丝不动（这条就是"说了没做"的锁）
+for (let i = 0; i < 10; i++) await fireIn('write', { file_path: `ar${i}.txt`, content: 'x' }, execAR);
+r = await callIn('plan_status', {}, execAR);
+check('（缺口一）等待期间连做 10 次写操作，预算仍然是 0', r.text.includes('已用 0/12'), r.text.split('\n').filter((l) => l.includes('预算')).join(''));
+check('（缺口二）plan_status 里能看到等待状态', r.text.includes('在等') && r.text.includes('等外部 API 返回'), r.text.slice(0, 400));
+check('（缺口二）并列出唤醒条件与超时动作', r.text.includes('API 返回 200') && r.text.includes('改用缓存'), r.text.slice(0, 460));
+await callIn('plan_insert', { after_ord: 1, steps: ['AR1.5 后加的'], reason: '测试膨胀' }, execAR);
+r = await callIn('plan_status', {}, execAR);
+check('（缺口三）plan_status 里能看到计划膨胀', r.text.includes('计划已从 2 步长到 3 步'), r.text.slice(0, 500));
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
