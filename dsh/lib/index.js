@@ -1606,7 +1606,13 @@ function planGoto(d, args, scope = "") {
 
 	if (args.step_id) {
 		const s = stepById(d, Number(args.step_id));
-		if (!s || s.plan_id !== plan.id || s.kind !== "plan") return { ok: false, reason: `计划步骤 #${args.step_id} 不存在` };
+		// 【放宽到额外步骤】原来只认 kind==='plan'，于是"当时漏记了一条额外步骤、现在要补记"
+		// 这条真实路径走不通（实测撞到：额外步骤 6 的活早做完了，但 plan_goto 切不过去、
+		// plan_step_done 又只作用于"当前步"，最后只能改库）。
+		// 额外步骤也是步骤，也该能被切过去 —— 拒掉它只会把人逼去绕路。
+		if (!s || s.plan_id !== plan.id || (s.kind !== "plan" && s.kind !== "detour")) {
+			return { ok: false, reason: `步骤 #${args.step_id} 不存在（它不属于本计划）` };
+		}
 		if (s.status === "done") return { ok: false, reason: `${stepLabel(s)}已完成，不需要重做（要重做请 plan_amend 或 plan_insert 加一步）` };
 		if (s.status === "dropped") return { ok: false, reason: `${stepLabel(s)}已被丢弃，不能切到它（要恢复请 plan_insert 重新加一步）` };
 		if (cur && cur.id !== s.id) {

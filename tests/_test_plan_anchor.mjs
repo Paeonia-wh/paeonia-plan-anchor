@@ -1310,5 +1310,24 @@ r = await callIn('plan_status', {}, execBA);
 const m = r.text.match(/在轨声明 (\d+) 次/);
 check('（统计）在轨声明计数会涨（可据此算误报率）', m && Number(m[1]) >= 1, r.text.slice(-400));
 
+console.log(`\n--- 68. 【补记路径】plan_goto 能切到额外步骤（今天撞到的真实场景）---`);
+const execBB = mkExec('D:\\projBB');
+await callIn('plan_set', { title: '补记测试', steps: ['主线第一步'] }, execBB);
+r = await callIn('plan_detour', { text: '一件额外的事', reason: '用户要的' }, execBB);
+const detourId = (() => { const m = r.text.match(/额外步骤 (\d+)/); return m ? Number(m[1]) : 0; })();
+// 先切回主线（模拟"焦点已经不在那条额外步骤上"）
+r = await callIn('plan_status', {}, execBB);
+const mainId = (() => { const m = r.text.match(/第 1 步\(id=(\d+)\)/); return m ? Number(m[1]) : 0; })();
+r = await callIn('plan_goto', { step_id: mainId, reason: '先回主线' }, execBB);
+check('（补记）能切回主线', !r.refused, r.text.slice(0, 160));
+
+// 关键：切到那条**额外步骤**（原来会被拒："计划步骤 #N 不存在"）
+r = await callIn('plan_status', {}, execBB);
+const dId = (() => { const m = r.text.match(/额外步骤(\d+)\(id=(\d+)\)/); return m ? Number(m[2]) : 0; })();
+check('（补记）能从步骤表里读到额外步骤的 id', dId > 0, `dId=${dId}`);
+r = await callIn('plan_goto', { step_id: dId, reason: '回去补记那条额外步骤' }, execBB);
+check('（补记·关键）plan_goto 不再拒绝额外步骤（原来只认主线）', !r.refused, r.text.slice(0, 220));
+check('（补记）切过去之后焦点确实在那条额外步骤上', r.text.includes('额外') || r.text.includes('一件额外的事'), r.text.slice(0, 260));
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
