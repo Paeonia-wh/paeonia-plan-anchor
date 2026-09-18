@@ -1275,15 +1275,15 @@ const execAZ2 = { agent: { session: { header: { cwd: 'D:\\projAZ' } }, id: 'othe
 r = await callIn('plan_set', { title: '别人的计划', steps: ['X1'] }, execAZ2);
 const okFirst = !r.refused;
 r = await callIn('plan_set', { title: '我要插一脚', steps: ['Y1'] }, execAZ);
-if (okFirst) {
-  check('（别人的）被拦住，不许静默作废', r.refused, r.text.slice(0, 200));
-  check('（别人的）说明后果：对方会静默失明', r.text.includes('静默失明') || r.text.includes('另一个会话'), r.text.slice(0, 320));
-  check('（别人的）给出三条出路', r.text.includes('replace: true'), r.text.slice(0, 420));
-} else {
-  check('（别人的）本环境无法构造第二个会话 —— 跳过', true, '（session key 由 harness 决定）');
-  check('（别人的）跳过', true, '');
-  check('（别人的）跳过', true, '');
-}
+// 【真并行】撞上别人的计划 → **不拦、不作废，并存**（拦是错的：那是别人正当的并行线）
+check('（并行）别的会话也能立自己的计划（不被拦）', !r.refused, r.text.slice(0, 200));
+check('（并行）新计划用的是自己的编号 v1（不是接着别人的版本）', r.text.includes('（v1）'), r.text.slice(0, 200));
+// 关键：A 的计划必须**还在**（没被静默作废）
+const aStill = await callIn('plan_status', {}, execAZ2);   // 查的是 A 那个会话（execAZ2）
+check('（并行）A 的计划完好无损（没被静默作废）', aStill.text.includes('别人的计划'), aStill.text.slice(0, 240));
+// 显式取代依然可用
+r = await callIn('plan_set', { title: '明着取代它', steps: ['Z1'], reason: '确认取代', replace: true }, execAZ);
+check('（并行）带 replace:true 仍可显式取代', !r.refused, r.text.slice(0, 200));
 
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -258,14 +258,16 @@ function sessionKeyOf(agent) {
  *
  * @param owner 会话标识；不传时退回旧行为（只按 scope 取最新一条），保证向后兼容。
  */
-function activePlan(d, scope = "", owner = "") {
-	if (owner) {
-		const mine = d.prepare("SELECT * FROM plans WHERE status='active' AND scope=? AND owner=? ORDER BY id DESC LIMIT 1").get(scope, owner);
-		if (mine) return mine;
-		// 本会话没有计划 → 不回退到别人的（那正是互踩的来源）
-		return null;
-	}
-	return d.prepare("SELECT * FROM plans WHERE status = 'active' AND scope = ? ORDER BY id DESC LIMIT 1").get(scope) || null;
+function activePlan(d, scope = "", owner = CURRENT_SESSION) {
+	const all = d.prepare("SELECT * FROM plans WHERE status='active' AND scope=? ORDER BY id DESC").all(scope);
+	if (!all.length) return null;
+	if (!owner) return all[0];                       // 没有会话信息 → 旧行为（取最新）
+	const mine = all.find((p) => p.owner === owner);
+	if (mine) return mine;                           // ① 本会话认领的那条
+	// ② 本会话没有 + 这个目录**恰好一条** → 用它（换会话/重启后无缝接上，不影响别人）
+	// ③ 本会话没有 + 有多条（= 真的多会话并存）→ **返回 null，不许猜**
+	//    "猜"就是互踩的来源：你会在不知情的情况下操作别人的计划。
+	return all.length === 1 ? all[0] : null;
 }
 
 /** 本目录下**别人的**活跃计划（用于"还有 N 条别的计划"的提示）。 */
@@ -478,9 +480,24 @@ const REF_PAIRS = [
 ];
 
 /** 所有工具的 exec 都过这里：把序号归一成 id，并把"我按什么理解"的说明附在回执上。 */
-function withRefs(d, args, scope, fn) {
+/**
+ * 【当前会话】—— 让 activePlan 不必在 20 处调用点都手改。
+ *
+ * 背景：要做到"两个会话各干各的"，activePlan 必须知道"我现在是哪个会话"。
+ * 但把它当参数串遍 20 处调用点是高风险改动（今天已经因为批量改动连炸 4 次）。
+ * 所以改成：**在公共入口 withRefs 里设一次**，activePlan 默认读它。
+ *
+ * 注意：钩子路径（回合锚/提醒）不走 withRefs，那里的 CURRENT_SESSION 是空串
+ * → activePlan 退回旧行为（按 scope 取最新）。这在"一个目录就一条 active"时是对的。
+ */
+let CURRENT_SESSION = "";
+
+function withRefs(d, args, scope, fn, session = "") {
 	let a = args || {};
 	const notes = [];
+	// 【设当前会话】整段执行期间 activePlan 都认这个会话；结束还原（嵌套调用也安全）
+	const _prevSession = CURRENT_SESSION;
+	CURRENT_SESSION = session || "";
 	try {
 		const plan = activePlan(d, scope);
 		if (plan) {
@@ -502,6 +519,7 @@ function withRefs(d, args, scope, fn) {
 		console.error("[plan-anchor] 引用解析出错（已跳过归一）:", e);
 	}
 	const out = fn(d, a, scope);
+	CURRENT_SESSION = _prevSession;      // 还原
 	if (notes.length && out && typeof out === "object" && typeof out.briefing === "string") {
 		return { ...out, briefing: out.briefing + "\n" + notes.join("\n") };
 	}
@@ -892,27 +910,22 @@ function planSet(d, args, scope = "", session = "") {
 	// 政企场景下这是最坏的一类失败。所以：
 	//   · 别人的计划 → 不许动（拒绝，并说明）
 	//   · 自己的计划 → 要取代必须**显式**（带 replace: true）
-	const prev = activePlan(d, scope);
+	let prev = activePlan(d, scope);
 	// 【注意】必须认 replace —— 第一版我写了"带 replace: true 可以取代"，
 	// 但条件里没有 `!args.replace`，于是那句话是空头支票（说了没做）。显式取代是允许的，
 	// 要求的只是**别静默**。
-	if (prev && prev.owner && session && prev.owner !== session && !args.replace) {
-		return {
-			ok: false,
-			reason: [
-				"⛔ **这个目录已经有一条别的会话的活跃计划 —— 不许静默作废它。**",
-				`   它叫『${prev.title}』（v${prev.version}，${new Date(Number(prev.created_at)).toLocaleString("zh-CN")} 立的）`,
-				"",
-				"  那条计划**可能正在被另一个会话跑着**。你把它作废了，对方的护栏会**静默失明**",
-				"  （查不到活跃计划 → 锚不再注入 → 没报错、也没提醒）。",
-				"",
-				"怎么办（三选一）：",
-				"  · 你只是要**另起一条并行的线** → 给它一个不同的 scope（换个工作目录），或等本功能做完",
-				"  · 那条计划**确实已经结束了** → 让**它那个会话**自己收尾，或你确认后带 `replace: true` 显式取代",
-				"  · 你要的就是**取代它** → `replace: true` + reason 写清为什么"
-			].join("\n")
-		};
+	// 【真并行】撞上**别的会话**的计划时：不拦、也不作废 —— **并存**。
+	// 拦是错的（那是别人正当的并行线）；作废更错（对方会静默失明）。
+	// 做法：把 prev 置空，跳过"作废旧的 + 继承旧进度"那套，新计划与它**各活各的**。
+	// owner 让两边各看各的（activePlan 三档：自己的 / 目录唯一一条 / 多条不猜）。
+	// 显式取代别人的计划仍然可以：带 replace: true（那时才真的作废它，并写台账）。
+	const _otherSession = !!(prev && prev.owner && session && prev.owner !== session);
+	if (_otherSession && !args.replace) {
+		prev = null;                    // 不动别人的 → 并存
+	} else if (_otherSession && args.replace) {
+		log(d, "plan_takeover", { planId: prev.id, ref: `${prev.owner}→${session}`, detail: `**显式取代了别的会话的计划**『${prev.title}』（原因：${args.reason}）`, session });
 	}
+
 	// 【自己的计划：不拦，但必须**说出来】** —— "不许静默"的正解是「不许不说」，不是「不许做」。
 	// 重规划是高频且正当的动作，硬拦会让它变啰嗦；但旧的计划被取代、它有几步已完成，
 	// 这件事必须显著写在回执里，不能只当成一句附带说明。
@@ -2847,7 +2860,7 @@ function apply(ctx, config) {
 			name: "plan_status",
 			description: "回归锚：我现在在第几步、下一步做什么、泊位几条、是否正在漂移。任何「我是不是跑偏了」的时刻都调它。",
 			params: { threshold: { type: "number", description: "漂移判定的调用次数阈值（默认 12，仅本次查询生效）" } },
-			exec: (a, x) => withRefs(d, a, scopeOf(x), planStatus)
+			exec: (a, x) => withRefs(d, a, scopeOf(x), planStatus, sessionKeyOf(x && x.agent))
 		},
 		{
 			name: "plan_step_done",
@@ -2872,7 +2885,7 @@ function apply(ctx, config) {
 				resume_after_step_id: { type: "number", description: "更稳的写法：直接给某个步骤的 id（从 plan_status 读），做完它我就提醒你" },
 				note: { type: "string", description: "补充信息；选 decline 时必填，说明为什么不做什么" }
 			},
-			exec: (a, x) => withRefs(d, a, scopeOf(x), planDiscover)
+			exec: (a, x) => withRefs(d, a, scopeOf(x), planDiscover, sessionKeyOf(x && x.agent))
 		},
 		{
 			name: "plan_goto",
@@ -2885,13 +2898,13 @@ function apply(ctx, config) {
 				// reason 同样故意不标 required：让代码层拒绝并解释"无理由的跳步会被记进台账"
 				reason: { type: "string", description: "必填。为什么现在改焦点" }
 			},
-			exec: (a, x) => withRefs(d, a, scopeOf(x), planGoto)
+			exec: (a, x) => withRefs(d, a, scopeOf(x), planGoto, sessionKeyOf(x && x.agent))
 		},
 		{
 			name: "plan_park",
 			description: "泊位清单：所有被泊下的新问题（永不自动消失，只能显式关闭）。",
 			params: { all: { type: "boolean", description: "true 则连已关闭的也列出" } },
-			exec: (a, x) => withRefs(d, a, scopeOf(x), planPark)
+			exec: (a, x) => withRefs(d, a, scopeOf(x), planPark, sessionKeyOf(x && x.agent))
 		},
 		{
 			name: "plan_close",
@@ -2902,7 +2915,7 @@ function apply(ctx, config) {
 				reason: { type: "string", description: "必填。为什么关闭它" },
 				outcome: { type: "string", description: "resolved（真的做完了）| declined（判定不做，默认）" }
 			},
-			exec: (a, x) => withRefs(d, a, scopeOf(x), planClose)
+			exec: (a, x) => withRefs(d, a, scopeOf(x), planClose, sessionKeyOf(x && x.agent))
 		},
 		{
 			name: "plan_amend",
@@ -2916,7 +2929,7 @@ function apply(ctx, config) {
 				commands: { type: "array", items: { type: "string" }, description: "新的允许命令范围" },
 				reason: { type: "string", description: "必填。为什么改这一步" }
 			},
-			exec: (a, x) => withRefs(d, a, scopeOf(x), planAmend)
+			exec: (a, x) => withRefs(d, a, scopeOf(x), planAmend, sessionKeyOf(x && x.agent))
 		},
 		{
 			name: "plan_insert",
@@ -2928,7 +2941,7 @@ function apply(ctx, config) {
 				focus: { type: "boolean", description: "焦点是否跟到新插入的步骤（默认：插在当前步之前就跟随，之后就不动）" },
 				reason: { type: "string", description: "必填。为什么插入" }
 			},
-			exec: (a, x) => withRefs(d, a, scopeOf(x), planInsert)
+			exec: (a, x) => withRefs(d, a, scopeOf(x), planInsert, sessionKeyOf(x && x.agent))
 		},
 		{
 			name: "plan_drop",
@@ -2938,7 +2951,7 @@ function apply(ctx, config) {
 				step_ord: { type: "number", description: "或直接填序号「第几步」" },
 				reason: { type: "string", description: "必填。为什么不做了" }
 			},
-			exec: (a, x) => withRefs(d, a, scopeOf(x), planDrop)
+			exec: (a, x) => withRefs(d, a, scopeOf(x), planDrop, sessionKeyOf(x && x.agent))
 		},
 		{
 			name: "plan_rework",
@@ -2950,7 +2963,7 @@ function apply(ctx, config) {
 				text: { type: "string", description: "返工任务写什么（默认「重做第 N 步：原文」）" },
 				acceptance: { type: "string", description: "返工的验收标准（强烈建议写）" }
 			},
-			exec: (a, x) => withRefs(d, a, scopeOf(x), planRework)
+			exec: (a, x) => withRefs(d, a, scopeOf(x), planRework, sessionKeyOf(x && x.agent))
 		},
 		{
 			name: "plan_review",
@@ -2959,7 +2972,7 @@ function apply(ctx, config) {
 				confirmed: { type: "boolean", required: true, description: "用户是否确认完成" },
 				note: { type: "string", description: "用户的原话/意见（confirmed=false 时务必填，会记进台账与步骤证据）" }
 			},
-			exec: (a, x) => withRefs(d, a, scopeOf(x), planReview)
+			exec: (a, x) => withRefs(d, a, scopeOf(x), planReview, sessionKeyOf(x && x.agent))
 		},
 		{
 			name: "plan_log",
@@ -2968,7 +2981,7 @@ function apply(ctx, config) {
 				limit: { type: "number", description: "条数（默认 20）" },
 				all: { type: "boolean", description: "true 则显示全部项目的台账（默认只看本计划）" }
 			},
-			exec: (a, x) => withRefs(d, a, scopeOf(x), planLog)
+			exec: (a, x) => withRefs(d, a, scopeOf(x), planLog, sessionKeyOf(x && x.agent))
 		},
 		{
 			name: "plan_ask",
@@ -3013,13 +3026,13 @@ function apply(ctx, config) {
 			name: "plan_report",
 			description: "生成**给人看的整理稿**（可直接贴给用户）：进度、这一段从哪开始、已经做完的、要做还没做的、临时加的任务、先记下回头再处理的。**零 id、零内部代号、零机器术语**。数据由计划本体生成（不漏不编）；「一句话 / 这一段发现的问题 / 建议」三段工具生成不了，必须你自己补。",
 			params: {},
-			exec: (a, x) => withRefs(d, a, scopeOf(x), planReport)
+			exec: (a, x) => withRefs(d, a, scopeOf(x), planReport, sessionKeyOf(x && x.agent))
 		},
 		{
 			name: "plan_mute",
 			description: "静音主动提醒 N 次工具调用（计划仍在锚位上，只是不打扰）。",
 			params: { calls: { type: "number", description: "静音的调用次数（默认 20）" } },
-			exec: (a, x) => withRefs(d, a, scopeOf(x), planMute)
+			exec: (a, x) => withRefs(d, a, scopeOf(x), planMute, sessionKeyOf(x && x.agent))
 		}
 	];
 
