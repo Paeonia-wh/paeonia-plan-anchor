@@ -2535,7 +2535,12 @@ function apply(ctx, config) {
 				discussTurns.set(agent, turns0);
 				if (turns0 === 1 && !p2) pendingFirstTurn.set(agent, true);
 				const sig = detectUserSignal(text);
+				// 【真 bug 修复】没信号时必须**清掉**上一回合残留的 ——
+				// 否则一个过期的信号会挂在那里，直到你下一次调工具才突然触发。
+				// 实测：用户先说"等一下你先别推送"，随后又说"直接推送吧"，
+				// 结果"他在叫你停"在几轮之后才炸出来，而那时它已经过期了。
 				if (sig) pendingUserSignal.set(agent, sig);
+				else pendingUserSignal.delete(agent);
 			}
 		} catch (error) {
 			try { log(d, "guard_error", { ref: "agent/pre-step", detail: String(error && error.message || error).slice(0, 200) }); } catch { /* ignore */ }

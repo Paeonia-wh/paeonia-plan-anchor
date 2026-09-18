@@ -1050,5 +1050,16 @@ await userSays(execAJ, '先不清理，你把我桌面整理一下');
 injJ = await fireIn('read', { file_path: 'aj2.js' }, execAJ);
 check('（③）真正的「先不清理」仍然触发叫停', noticeText(injJ).includes('叫你停'), noticeText(injJ).slice(0, 140));
 
+console.log(`\n--- 55. 【真 bug】过期信号必须作废（否则几轮后才炸出来） ---`);
+const execAK = mkExec('D:\\projAK');
+await callIn('plan_set', { title: 'AK 计划', steps: ['AK1'] }, execAK);
+await userSays(execAK, '等一下，你先别推送');
+await userSays(execAK, '算了直接推送吧');   // 新回合**没有**信号 → 旧的必须作废
+const injK = await fireIn('read', { file_path: 'ak.js' }, execAK);
+check('（过期信号）上一轮的「等一下」不再触发叫停', !noticeText(injK).includes('叫你停'), noticeText(injK).slice(0, 160));
+await userSays(execAK, '停一下');
+const injK2 = await fireIn('read', { file_path: 'ak2.js' }, execAK);
+check('（对照）当回合的信号仍然照常触发', noticeText(injK2).includes('叫你停'), noticeText(injK2).slice(0, 160));
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
