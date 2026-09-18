@@ -1972,6 +1972,50 @@ function planAsk(d, args, scope = "", session = "") {
 	};
 }
 
+/**
+ * 9h. plan_detour：**「我现在要去做一件主线之外的事」** —— 直接开一条额外步骤。
+ *
+ * 为什么需要它（用户一眼看出来的缺口）：
+ *   质问只给了三个选项（在推进 / 卡住了 / 不想做了），但真实使用里最常见的第四种是
+ *   —— **「我在做用户另外要求的一件事」**。而现有能力里，开额外步骤必须先入泊再提取（两步），
+ *   于是发生这种事时只能靠 plan_note 嘴上说一句「我在推进」，**它从来没进过计划**。
+ *
+ * 与 plan_discover(permit) 的区别：permit 是**我自己跑去追**新问题（记偏离）；
+ *   这个是**用户要我做**的事（不记偏离 —— 用户改方向不是跑偏）。
+ * 与 plan_rework 的区别：那个是重做某个旧步骤的产出，带 rework_of 链接。
+ */
+function planDetour(d, args, scope = "", session = "") {
+	const plan = activePlan(d, scope);
+	if (!plan) return { ok: false, reason: "当前项目没有生效计划 —— 没有主线，就谈不上「主线之外」。" };
+	const text = (args.text || "").trim();
+	if (!text) return { ok: false, reason: "text 必填：这件「主线之外的事」是什么？" };
+	const reason = (args.reason || "").trim();
+	const acceptance = (args.acceptance || "").trim();
+	const cur = currentStep(d, plan.id);
+	const dNo = lineageDetourNo(d, plan);
+	const res = d.prepare(
+		"INSERT INTO steps (plan_id, ord, detour_no, text, kind, from_park, acceptance, status, started_at) VALUES (?,?,?,?,'detour',0,?,'active',?)"
+	).run(plan.id, DETOUR_ORD_BASE + dNo, dNo, text, acceptance, now());
+	const rid = Number(res.lastInsertRowid);
+	if (cur && cur.kind === "plan") {
+		d.prepare("UPDATE steps SET status='pending' WHERE id=?").run(cur.id);
+		stSet(d, plan.id, "resume_step", cur.id);
+	}
+	setCurrent(d, plan.id, rid);
+	setBudget(d, plan.id, 0);
+	log(d, "detour", { planId: plan.id, stepId: rid, ref: `额外 ${dNo}`, detail: `${text}${reason ? `｜因为：${reason}` : ""}`, session });
+	return {
+		ok: true,
+		detour_no: dNo,
+		briefing: [
+			`【已开一条额外步骤 ${dNo}】${text}`,
+			reason ? `理由已记录：${reason}` : "",
+			cur && cur.kind === "plan" ? `主线第 ${cur.ord} 步「${cur.text}」已挂起 —— 做完这条 plan_step_done 会**自动回到它**。` : "",
+			"（额外步骤**不计偏离额度**：它是「要做的活」，不是「跑偏」。主线仍然是主线，它只是岔出去的一条。）"
+		].filter(Boolean).join("\n")
+	};
+}
+
 /** 9. plan_mute：静音提醒 N 次工具调用（防"哭狼来了"，但计划仍在，只是不主动打扰） */
 /** 【第 6 件 · flow mode 式有限豁免】静音不是"关掉护栏"：必须有理由、有硬上限、到期自动恢复并温和 check-in。 */
 function planMute(d, args, scope = "") {
@@ -2092,7 +2136,7 @@ function turnAnchorNotice(d, scope = "") {
 				"三种可能，选一个说清楚：",
 				"  · **这一步其实不该这么做** → `plan_amend` 改它 / `plan_drop` 丢掉 / `plan_set` 换计划",
 				"  · **确实还在做它** → 再 `plan_note` 一次（但顺带想想：为什么这么久没进展？）",
-				"  · **你在做别的事** → 把它记成计划的一部分（`plan_insert`），别让它悬着",
+				"  · **你在做用户另外要的事**（不是主线这一步）→ `plan_detour` 把它开成一条额外步骤：主线挂起、做完自动回来、**不计偏离**。别让它只活在对话里。",
 				"",
 				"（豁免是有的，但**不会永久** —— 否则你漂走了也没人提醒你。）"
 			].join("\n"), "plan anchor (ack expired)");
@@ -2489,6 +2533,16 @@ function apply(ctx, config) {
 				what: { type: "string", required: true, description: "要做的**具体动作**与影响（泛泛地问会被拒）" }
 			},
 			exec: (a, x) => planAsk(d, a, scopeOf(x), sessionKeyOf(x && x.agent))
+		},
+		{
+			name: "plan_detour",
+			description: "「我现在要去做一件主线之外的事」—— 直接开一条额外步骤：主线当前步挂起，做完自动回来，**不计偏离额度**（用户要做的活 ≠ 跑偏）。",
+			params: {
+				text: { type: "string", description: "必填。这件主线之外的事是什么" },
+				reason: { type: "string", description: "为什么现在要做它（例如：用户刚要求的）" },
+				acceptance: { type: "string", description: "怎么算做完" }
+			},
+			exec: (a, x) => withRefs(d, a, scopeOf(x), (dd, aa, sc) => planDetour(dd, aa, sc, sessionKeyOf(x && x.agent)))
 		},
 		{
 			name: "plan_note",

@@ -1106,8 +1106,23 @@ for (let i = 0; i < 4; i++) last = await anc();
 check('（豁免期）第 5 回合仍在豁免内', last.includes('豁免第 5/5 回合'), last.slice(0, 170));
 const expired = await anc();
 check('（关键）豁免到期 → 重新问，不会永久失明', expired.includes('声明「在轨」已经') && expired.includes('一步没动'), expired.slice(0, 220));
-check('（关键）升级质问给出三种出路', expired.includes('plan_amend') && expired.includes('plan_insert') && expired.includes('plan_note'), expired.slice(0, 320));
+check('（关键）升级质问给出四条出路（含新增的 plan_detour）', expired.includes('plan_amend') && expired.includes('plan_note') && expired.includes('plan_detour'), expired.slice(0, 360));
 check('（关键）并明说豁免不会永久', expired.includes('不会永久'), expired.slice(0, 360));
+
+console.log(`\n--- 59. 【初心】主线之外的事：plan_detour 直接开额外步骤 ---`);
+const execAO = mkExec('D:\\projAO');
+await callIn('plan_set', { title: 'AO 计划', steps: ['AO1 主线第一步', 'AO2 主线第二步'] }, execAO);
+r = await callIn('plan_detour', { text: '给这个项目做一套宣传图', reason: '用户刚要求的', acceptance: '15 张图生成完' }, execAO);
+check('（plan_detour）开出一条额外步骤', !r.refused && r.text.includes('已开一条额外步骤'), r.text.slice(0, 200));
+check('（plan_detour）主线当前步被挂起', r.text.includes('已挂起'), r.text.slice(0, 240));
+check('（plan_detour）明说不计偏离额度', r.text.includes('不计偏离额度'), r.text.slice(0, 260));
+r = await callIn('plan_status', {}, execAO);
+check('（plan_detour）状态显示：在做额外步骤，主线挂着', r.text.includes('额外步骤'), r.text.slice(0, 200));
+await fireIn('write', { file_path: 'ao.txt', content: 'x' }, execAO);
+r = await callIn('plan_step_done', { evidence: '15 张图做完了' }, execAO);
+check('（plan_detour）做完自动回到主线', r.text.includes('自动回到主线'), r.text.slice(0, 240));
+r = await callIn('plan_detour', {}, execAO);
+check('（plan_detour）不写 text 被拒', r.refused && r.text.includes('text 必填'), r.text.slice(0, 160));
 
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
