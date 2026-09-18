@@ -78,7 +78,7 @@ check('提示去立计划', r.text.includes('没有生效的计划'), r.text);
 
 console.log('\n--- 2. plan_set 立计划（I1：只允许一个 active 步骤）---');
 r = await call('plan_set', { title: '把电梯 demo 上 Docker', steps: ['调研现有 Dockerfile', '写 Dockerfile', '写 compose 编排', '本地跑通', '写部署文档', '上线试运行'] });
-check('立计划成功且开工第 1 步', r.text.includes('第 1/6 步') && r.text.includes('已立计划'), r.text);
+check('立计划成功且开工第 1 步', r.text.includes('工作步 0/6 完成') && r.text.includes('已立计划'), r.text);
 check('v1', r.text.includes('（v1）'), r.text);
 
 console.log('\n--- 3. I3：不许可静默覆盖计划 ---');
@@ -95,7 +95,7 @@ check('明确要求不要现在处理', r.text.includes('不要处理它'), r.te
 check('并把焦点按回第 1 步', r.text.includes('主线第 1 步'), r.text);
 r = await call('plan_status', {});
 check('泊位 1 条未处理', r.text.includes('泊位 1 条未处理'), r.text);
-check('当前步仍是第 1 步（未被抢占）', r.text.includes('主线第 1/6 步'), r.text);
+check('当前步仍是第 1 步（未被抢占）', r.text.includes('工作步 0/6 完成'), r.text);
 
 console.log('\n--- 5. I7：完成步骤必须写 evidence ---');
 r = await call('plan_step_done', {});
@@ -112,7 +112,7 @@ console.log('\n--- 6. 正常推进一步（先留下工作痕迹）---');
 await work();
 r = await call('plan_step_done', { evidence: '读了现有 Dockerfile 与 requirements.txt，确认 base 镜像与依赖' });
 check('第 1 步完成 → 第 2 步', r.text.includes('第 1 步完成') && r.text.includes('第 2 步'), r.text);
-check('已推进 1/6', r.text.includes('主线 1/6 步'), r.text);
+check('已推进 1/6', r.text.includes('工作步 1/6 完成'), r.text);
 
 console.log('\n--- 6b. 回程票到期：主线第 1 步做完 → 主动举手提醒（ready-to-resume）---');
 r = await call('plan_status', {});
@@ -193,7 +193,7 @@ console.log('\n--- 13. I6：偏离结束后自动回到挂起的步骤 ---');
 await work();
 r = await call('plan_step_done', { evidence: '换端口 5433，compose 起来了' });
 check('自动回到第 3 步', r.text.includes('已自动回到主线第 3 步') && r.text.includes('额外步骤 1 已完成'), r.text);
-check('回归后状态为 active（解除阻塞）', r.text.includes('第 3/6 步'), r.text);
+check('回归后状态为 active（解除阻塞）', r.text.includes('工作步 2/6 完成'), r.text);
 
 console.log('\n--- 14. 从泊位提取条目来做（必须写 reason，留痕）---');
 r = await call('plan_goto', { park_id: 1 });
@@ -221,12 +221,12 @@ for (const ev of ['第 3 步完成：compose 三件套跑通', '第 4 步完成�
   await call('plan_step_done', { evidence: ev });
 }
 r = await call('plan_status', {});
-check('完成第 3、4、5 步后为 5/6', r.text.includes('主线 5/6 步'), r.text);
+check('完成第 3、4、5 步后为 5/6', r.text.includes('工作步 5/6 完成'), r.text);
 await work();
 r = await call('plan_step_done', { evidence: '上线完成，健康检查通过' });
 check('最后一步做完 → 触发完成闸门（不许自己拍板）', r.text.includes('计划还不能算完成') && r.text.includes('ask_user_question'), r.text);
 check('并提示用户回答后怎么记账', r.text.includes('plan_review'), r.text);
-check('计数到 6/6', r.text.includes('主线 6/6 步'), r.text);
+check('计数到 6/6', r.text.includes('工作步 6/6 完成'), r.text);
 
 console.log('\n--- 17. 显式重规划（带 reason，旧版留痕）---');
 r = await call('plan_set', { title: '下一阶段：加监控告警', steps: ['选监控方案', '接 Prometheus', '配告警规则'], reason: '上一阶段已交付，进入运维阶段' });
@@ -322,7 +322,7 @@ const newNo = Number((r.text.match(/记为额外步骤 (\d+)/) || [0, 0])[1]);
 check('提取泊位时标注记为额外步骤 N，且 N = 上一个最大号 + 1', newNo === maxBefore + 1, `newNo=${newNo} maxBefore=${maxBefore} :: ${r.text}`);
 check('并明确说明挂起的是主线第几步', /主线第\s*\d+\s*步/.test(r.text), r.text);
 r = await call('plan_status', {});
-check('锚头同时报两层进度', /主线 \d+\/\d+ 步｜额外步骤 \d+\/\d+ 完成/.test(r.text), r.text);
+check('锚头同时报两层进度', /工作步 \d+\/\d+ 完成｜额外步骤 \d+\/\d+ 完成/.test(r.text), r.text);
 check('正在做额外步骤时，明确回答"主线哪一步被挂起"', r.text.includes(`额外步骤${newNo}`) && /主线第\s*\d+\s*步/.test(r.text), r.text);
 await work();
 r = await call('plan_step_done', { evidence: '缓存目录已配好' });
@@ -362,13 +362,13 @@ r = await callIn('plan_set', { title: '项目B的计划', steps: ['B1 只有一�
 check('B 项目立计划无需 reason（A 的计划没串过来）', !r.refused && r.text.includes('项目B的计划'), r.text);
 r = await callIn('plan_status', {}, execA);
 check('A 只看到自己的计划', r.text.includes('项目A的计划') && !r.text.includes('项目B的计划'), r.text);
-check('A 的主线是 0/2', r.text.includes('主线 0/2 步'), r.text);
+check('A 的主线是 0/2', r.text.includes('工作步 0/2 完成'), r.text);
 r = await callIn('plan_status', {}, execB);
 check('B 只看到自己的计划（尾斜杠归一化生效）', r.text.includes('项目B的计划') && !r.text.includes('项目A的计划'), r.text);
-check('B 的主线是 0/1', r.text.includes('主线 0/1 步'), r.text);
+check('B 的主线是 0/1', r.text.includes('工作步 0/1 完成'), r.text);
 await callIn('plan_step_done', { evidence: 'A 的第一个动作做完了' }, execA);
 r = await callIn('plan_status', {}, execB);
-check('B 仍停在 0/1（没被 A 的推进带动）', r.text.includes('主线 0/1 步'), r.text);
+check('B 仍停在 0/1（没被 A 的推进带动）', r.text.includes('工作步 0/1 完成'), r.text);
 r = await call('plan_status', {});
 check('默认作用域（本测试主线）完全没被污染', r.text.includes('下一阶段：加监控告警'), r.text);
 r = await callIn('plan_log', {}, execA);
@@ -484,7 +484,7 @@ await userTurn(execE); // 模拟用户真的回话了
 r = await callIn('plan_review', { confirmed: false, note: 'E2 没做完，回归测试没跑' }, execE);
 check('用户说没完成 → 最后一步被如实退回（不是嘴上改口）', r.text.includes('没完成') && r.text.includes('退回未完成'), r.text);
 r = await callIn('plan_status', {}, execE);
-check('退回后焦点回到那一步', /主线第 2\/2 步/.test(r.text), r.text);
+check('退回后焦点回到那一步', /工作步 1\/2 完成/.test(r.text), r.text);
 
 await fireIn('read', { file_path: 'e2.js' }, execE);
 await callIn('plan_step_done', { evidence: '补跑了回归测试，全绿' }, execE);
@@ -502,7 +502,7 @@ for (const ev of ['调研完成', '配置写完']) {
   await callIn('plan_step_done', { evidence: ev }, execF);
 }
 r = await callIn('plan_status', {}, execF);
-check('起点：主线 2/5，焦点在第 3 步', r.text.includes('主线 2/5 步') && /▶ 主线第3步\(id=\d+\) 3 写代码/.test(r.text), r.text);
+check('起点：工作步 2/5，焦点在第 3 步', r.text.includes('工作步 2/5 完成') && /▶ 主线第3步\(id=\d+\) 3 写代码/.test(r.text), r.text);
 // 注意：step_id 是**数据库 id**，不是序号 —— 模型也要从 plan_status 里读它
 const idOfOrd = (text, ord) => { const m = text.match(new RegExp(`主线第${ord}步\\(id=(\\d+)\\)`)); return m ? Number(m[1]) : 0; };
 const id4 = idOfOrd(r.text, 4);
@@ -512,7 +512,7 @@ check('能从步骤表里读出第 4 步的 id', id4 > 0, `id4=${id4}`);
 r = await callIn('plan_amend', { step_id: id4, text: '4 集成测试', acceptance: '集成环境里三个服务互通', reason: '测试要拆细' }, execF);
 check('amend：编号不变、身份不变', r.text.includes('编号未变、身份未变、历史保留'), r.text);
 r = await callIn('plan_status', {}, execF);
-check('amend 后进度仍是 2/5（没有归零）', r.text.includes('主线 2/5 步'), r.text);
+check('amend 后进度仍是 2/5（没有归零）', r.text.includes('工作步 2/5 完成'), r.text);
 check('amend 后第 4 步文字已改', r.text.includes('4 集成测试（验收：集成环境里三个服务互通）'), r.text);
 
 // ② 插一步：在第 4 步后面插「压测」
@@ -520,7 +520,7 @@ r = await callIn('plan_insert', { after_step_id: id4, steps: ['5 压测', { text
 check('insert：明确告知编号顺延', r.text.includes('编号已顺延'), r.text);
 check('insert：明确告知身份与完成状态没被带跑', r.text.includes('没有被带跑'), r.text);
 r = await callIn('plan_status', {}, execF);
-check('insert 后主线 2/7（进度保住）', r.text.includes('主线 2/7 步'), r.text);
+check('insert 后工作步 2/7（进度保住）', r.text.includes('工作步 2/7 完成'), r.text);
 check('insert 后焦点仍在第 3 步（没被带跑）', /▶ 主线第3步\(id=\d+\) 3 写代码/.test(r.text), r.text);
 check('insert 后原第 5 步「上线」变成第 7 步', /主线第7步\(id=\d+\) 5 上线/.test(r.text), r.text);
 check('已完成的 1、2 步始终是 ✔', /✔ 主线第1步\(id=\d+\) 1 调研/.test(r.text) && /✔ 主线第2步\(id=\d+\) 2 写配置/.test(r.text), r.text);
@@ -530,7 +530,7 @@ r = await callIn('plan_drop', { step_id: id4, reason: '环境里没有集成环�
 check('drop：明确告知编号收拢', r.text.includes('编号已收拢'), r.text);
 check('drop：说明行没被删除、历史可查', r.text.includes('行没有被删除'), r.text);
 r = await callIn('plan_status', {}, execF);
-check('drop 后主线 2/6，进度仍保住', r.text.includes('主线 2/6 步'), r.text);
+check('drop 后工作步 2/6，进度仍保住', r.text.includes('工作步 2/6 完成'), r.text);
 check('被丢弃的步骤仍列在步骤表里（标 ⊘丢弃）', /⊘丢弃 主线第4步\(id=\d+\) 4 集成测试/.test(r.text), r.text);
 check('修订史记录了三种修订', r.text.includes('原地改') && r.text.includes('插入') && r.text.includes('丢弃'), r.text);
 check('步骤文字里过时的旧编号会被标注出来（不改你的字，但不许悄悄错）', r.text.includes('是旧编号'), r.text);
@@ -640,12 +640,12 @@ check('丢弃已完成的步骤 → 被拒', r.refused, r.text);
 check('拒绝理由点明"已完成是历史，不是草稿"', r.text.includes('已完成') && r.text.includes('历史'), r.text);
 check('并指路 amend / plan_set', r.text.includes('plan_amend') && r.text.includes('plan_set'), r.text);
 r = await callIn('plan_status', {}, execM);
-check('进度没被抹掉（仍 1/3）', r.text.includes('主线 1/3 步'), r.text);
+check('进度没被抹掉（仍 1/3）', r.text.includes('工作步 1/3 完成'), r.text);
 // 未完成的步骤仍然可以丢
 r = await callIn('plan_drop', { step_id: idOf(r.text, 3), reason: 'M3 不做了' }, execM);
 check('未完成的步骤照常可丢', !r.refused && r.text.includes('已丢弃'), r.text);
 r = await callIn('plan_status', {}, execM);
-check('丢弃未完成步骤后：已完成的那步还在（1/2）', r.text.includes('主线 1/2 步') && /✔ 主线第1步\(id=\d+\) M1/.test(r.text), r.text);
+check('丢弃未完成步骤后：已完成的那步还在（1/2）', r.text.includes('工作步 1/2 完成') && /✔ 主线第1步\(id=\d+\) M1/.test(r.text), r.text);
 // 连带隐患：不能切到一个已丢弃的步骤
 const droppedId = (r.text.match(/⊘丢弃 主线第2步\(id=(\d+)\)/) || [0, 0])[1];
 r = await callIn('plan_goto', { step_id: Number(droppedId), reason: '想回到它' }, execM);
@@ -688,7 +688,7 @@ r = await callIn('plan_set', { title: 'OA 第二版', steps: ['A', 'B'], reason:
 check('未写映射时，已完成的旧步骤被明确吼出来', r.text.includes('没有被任何映射认领'), r.text);
 check('并给出两条出路：kept 认领 / replaced 返工', r.text.includes('kept') && r.text.includes('replaced'), r.text);
 r = await callIn('plan_status', {}, execOA);
-check('新计划从 0 开始（因为没认领）', r.text.includes('主线 0/2 步'), r.text);
+check('新计划从 0 开始（因为没认领）', r.text.includes('工作步 0/2 完成'), r.text);
 
 // (b) 带映射：第 1 步保留（继承完成状态），第 2 步取代=返工
 const execOB = { agent: { session: { header: { cwd: 'D:\\projOB' } } } };
@@ -699,7 +699,7 @@ for (const ev of ['调研做得很扎实', '配置写完但写错了']) {
 }
 let stOB = (await callIn('plan_status', {}, execOB)).text;
 const idOB1 = idOf(stOB, 1), idOB2 = idOf(stOB, 2);
-check('起点：OB 2/3', stOB.includes('主线 2/3 步'), stOB);
+check('起点：OB 2/3', stOB.includes('工作步 2/3 完成'), stOB);
 r = await callIn('plan_set', {
   title: 'OB 第二版',
   reason: '到这一步发现配置那步做错了',
@@ -713,7 +713,7 @@ check('回执说明「完成状态已继承」', r.text.includes('完成状态')
 check('回执说明新第 2 步是返工', r.text.includes('返工') && r.text.includes('取代旧第 2 步'), r.text);
 check('并提醒下游要复查', r.text.includes('下游步骤'), r.text);
 r = await callIn('plan_status', {}, execOB);
-check('继承生效：新计划直接是 1/3（不是 0/3）', r.text.includes('主线 1/3 步'), r.text);
+check('继承生效：新计划直接是 1/3（不是 0/3）', r.text.includes('工作步 1/3 完成'), r.text);
 check('焦点落在返工那一步（第 2 步），不是第 1 步', /▶ 主线第2步\(id=\d+\) OB2 重写配置/.test(r.text), r.text);
 check('步骤表标出返工关系', r.text.includes('🔁 返工：取代 #'), r.text);
 check('继承的那一步带来源标注', r.text.includes('继承自旧计划第 1 步'), r.text);
@@ -722,7 +722,7 @@ check('已被认领的步骤不再出现在"未认领"清单里（E2E 抓到的�
 await fireIn('read', { file_path: 'ob2.js' }, execOB);
 await callIn('plan_step_done', { evidence: '配置重写完成，这次对过了' }, execOB);
 r = await callIn('plan_status', {}, execOB);
-check('返工完成后 → 2/3', r.text.includes('主线 2/3 步'), r.text);
+check('返工完成后 → 2/3', r.text.includes('工作步 2/3 完成'), r.text);
 
 console.log(`\n--- 41. 【你的场景】做到第 5 步时发现第 1 步做错了 → 当场开返工 ---`);
 const execP = { agent: { session: { header: { cwd: 'D:\\projP' } } } };
@@ -733,7 +733,7 @@ for (const ev of ['方案定了', '库建好了']) {
   await callIn('plan_step_done', { evidence: ev }, execP);
 }
 let stP = (await callIn('plan_status', {}, execP)).text;
-check('起点：做到第 3 步（2/5）', stP.includes('主线 2/5 步') && /▶ 主线第3步\(id=\d+\) P3 写接口/.test(stP), stP);
+check('起点：做到第 3 步（2/5）', stP.includes('工作步 2/5 完成') && /▶ 主线第3步\(id=\d+\) P3 写接口/.test(stP), stP);
 const idP1 = idOf(stP, 1);
 // 发现第 1 步"定方案"做错了
 r = await callIn('plan_rework', { step_id: idP1, reason: '方案选错了，后面全建立在它上面', acceptance: '新方案评审通过，且 P2 的库要按新方案调整' }, execP);
@@ -747,7 +747,7 @@ check('说明不计入偏离额度（纠错不是跑偏）', r.text.includes('�
 check('手上那步被挂起、返工做完自动回来', r.text.includes('已挂起') && r.text.includes('自动回到它'), r.text);
 r = await callIn('plan_status', {}, execP);
 check('步骤表里能看到返工支线', r.text.includes('🔁 返工：取代 #'), r.text);
-check('返工期间主线进度保持 2/5（没被搅乱）', r.text.includes('主线 2/5 步'), r.text);
+check('返工期间主线进度保持 2/5（没被搅乱）', r.text.includes('工作步 2/5 完成'), r.text);
 // 做完返工 → 自动回到主线第 3 步
 await fireIn('read', { file_path: 'p2.js' }, execP);
 r = await callIn('plan_step_done', { evidence: '方案重定并评审通过' }, execP);

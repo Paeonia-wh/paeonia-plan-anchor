@@ -262,6 +262,22 @@ function currentStepRaw(d, planId) {
 	const id = stGet(d, planId, "current_step");
 	return id ? stepById(d, Number(id)) : null;
 }
+/**
+ * 【进度的唯一口径】"工作步 X/Y 完成"。
+ *
+ * 为什么要有这个函数：这句话原来在**四个地方各写一遍**（回合锚完整版 / 缩短版 /
+ * plan_status 抬头 / 回锚简报），改口径要改四处、漏一处就不一致 —— 实测就漏过一次。
+ * 现在**只在这里定义一次**，谁要显示进度都调它。
+ *
+ * 两个口径必须分清（这是那个 34/31 矛盾的根）：
+ *   · **进度** = 工作步的完成数/总数（验收步不算 —— 那是"等用户"，不是"我的进度"）
+ *   · **ord**  = 全计划的位置编号（含验收步），plan_report / 编号顺延 / 引用步骤靠它
+ * 两者不要写进同一个短句里。
+ */
+function progressText(done, total) {
+	return `工作步 ${done}/${total} 完成`;
+}
+
 function planSteps(d, planId) {
 	// 只返回"活着"的**工作**步骤（不含被 drop 的、不含验收步）：总数 n、找下一个待办都该用它
 	// 【为什么要分开】验收步是"请用户看 agent 的表现"，不是要干的活 ——
@@ -731,7 +747,7 @@ function anchorText(d, plan, opts = {}) {
 	const lines = [];
 	// 两套编号分开报：主线 k/n 一条线，额外步骤 j 另一条线。混在一起就永远说不清"我们到哪了"
 	const dtPart = dts.length ? `｜额外步骤 ${dtDone}/${dts.length} 完成` : "";
-	lines.push(`【计划锚】${plan.title}（v${plan.version}）｜主线 ${done}/${steps.length} 步${dtPart}`);
+	lines.push(`【计划锚】${plan.title}（v${plan.version}）｜${progressText(done, steps.length)}${dtPart}`);
 	// 编号刚变过就必须主动说 —— 否则"我们做到哪了"跨修订又会含混
 	const rev = revisionNote(d, plan.id);
 	if (rev) lines.push(`⚠ 计划刚修订过：${rev}`);
@@ -744,7 +760,7 @@ function anchorText(d, plan, opts = {}) {
 			? `主线第 ${r.ord} 步「${r.text}」已挂起 —— 做完 plan_step_done 会**自动回到主线第 ${r.ord} 步**。`
 			: "主线当前没有挂起的步骤；做完 plan_step_done 会回到主线的下一个待办步。");
 	} else if (cur) {
-		lines.push(`▶ 当前：**主线第 ${cur.ord}/${steps.length} 步**：${stepCue(cur)}`);
+		lines.push(`▶ 要做：**${stepCue(cur)}**`);   // stepCue 带「（验收：…）」，别绕过它
 	} else {
 		lines.push("▶ 主线当前没有进行中的步骤。");
 	}
@@ -2456,7 +2472,7 @@ function turnAnchorNotice(d, scope = "") {
 	if (n > 1) {
 		// 上回合变过、这回合没变 → 缩成一行
 		return notice(
-			`【计划锚】${plan.title}｜工作步 ${doneN}/${steps.length}${cur ? `｜要做：${cur.text}` : ""}${acc.length ? `｜👁 待你验收 ${acc.length} 项` : ""}${park ? `｜泊位 ${park}` : "｜泊位空"}（与上回合相同，已缩短）`,
+			`【计划锚】${plan.title}｜${progressText(doneN, steps.length)}${cur ? `｜要做：${stepCue(cur)}` : ""}${acc.length ? `｜👁 待你验收 ${acc.length} 项` : ""}${park ? `｜泊位 ${park}` : "｜泊位空"}（与上回合相同，已缩短）`,
 			"plan anchor (compact)"
 		);
 	}
@@ -2464,18 +2480,18 @@ function turnAnchorNotice(d, scope = "") {
 	// 【分两块】工作步骤（agent 做）与验收步骤（**请用户看**）混在一起显示过 ——
 	// 用户当场指出："感觉我们现在也没在做这个吧"（他以为"看我先表态"是要干的活）。
 	// 所以进度只算工作步骤，验收单独一节。
-	const bits = [`【计划锚】${plan.title}｜工作步 ${doneN}/${steps.length} 完成${dtInfo}`];
+	const bits = [`【计划锚】${plan.title}｜${progressText(doneN, steps.length)}${dtInfo}`];
 	if (cur && cur.kind === "detour") {
 		const r = stGet(d, plan.id, "resume_step");
 		const rs = r ? stepById(d, Number(r)) : null;
 		bits.push(`在做额外步骤 ${cur.detour_no}：${cur.text}${rs ? `（主线第 ${rs.ord} 步已挂起）` : ""}`);
 	} else if (cur) {
-		bits.push(`要做：${cur.text}`);
+		bits.push(`要做：${stepCue(cur)}`);   // stepCue 会带上「（验收：…）」—— 别绕过它
 	} else {
 		// 【别撒谎】焦点落在验收步上时，不能直接说"都做完了" —— 得先看有没有**待办的工作步**。
 		// （实测踩到：第 34 步还没做，锚却说"✔ 要做的工作步骤都做完了"。）
 		const nextWork = steps.find((s) => s.status !== "done");
-		if (nextWork) bits.push(`要做：${nextWork.text}`);
+		if (nextWork) bits.push(`要做：${stepCue(nextWork)}`);
 		else if (acc.length) bits.push("✔ 要做的工作步骤都做完了（剩下的是等你验收）");
 		else bits.push("主线无进行中步骤");
 	}
@@ -2660,7 +2676,7 @@ function progressBriefing(d, plan) {
 	const lines = ["【真实进度 —— 照这个答，不要凭记忆】"];
 	const rev = revisionNote(d, plan.id);
 	if (rev) lines.push(`⚠ 计划刚修订过：${rev}`);
-	lines.push(`计划：《${plan.title}》 主线 ${done.length}/${steps.length} 步`);
+	lines.push(`计划：《${plan.title}》 ${progressText(done.length, steps.length)}`);
 	lines.push(cur ? `当前在：第 ${cur.ord} 步「${cur.text}」` : "当前没有进行中的步骤");
 	lines.push(done.length ? `已完成：${done.map((s) => `第${s.ord}步「${s.text}」`).join("；")}` : "已完成：无");
 	// 额外步骤（跨修订连续）也要报 —— 这是"两套编号"的另一半，不能被漏掉
@@ -2980,7 +2996,10 @@ function apply(ctx, config) {
 				if (sig) pendingUserSignal.set(agent, sig);
 				else pendingUserSignal.delete(agent);
 				// 【记账提醒用】用户这句是不是"一句短话"（选项回答/确认的典型形态）
-				shortTurn.set(agent, String(text).trim().length <= 15);
+				// 阈值 30：实测 15 太窄 —— 用户说「然后那个数字矛盾你也修好吧」（21 字）是**真指令**，
+				// 却没被算作"短话"，于是记账提醒没响，我又漏了一次。
+				// 而真正的长句（有实质内容的描述，如"你把那个日志调整一下，另外顺手看看…"约 38 字）仍不触发。
+				shortTurn.set(agent, String(text).trim().length <= 30);
 				planTouched.delete(agent);   // 新回合，记账标记归零
 			}
 		} catch (error) {
