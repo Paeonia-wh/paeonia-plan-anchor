@@ -6,7 +6,7 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Node](https://img.shields.io/badge/node-%E2%89%A522.13-brightgreen.svg)
-![Tests](https://img.shields.io/badge/tests-299%20assertions-success.svg)
+![Tests](https://img.shields.io/badge/tests-342%20assertions-success.svg)
 ![Host](https://img.shields.io/badge/host-DSH%20plugin-blueviolet.svg)
 
 ---
@@ -121,6 +121,48 @@ flowchart TB
 
 完整的 I1–I12 见 [`SPEC.md`](SPEC.md) 第 1 节，每条都标了强制层。
 
+## 这些做法有实证支撑（不是我们的直觉）
+
+围绕「AI 到底跟不跟它自己的计划」，有一篇目前最系统的实证研究：
+
+**《From Plan to Action: How Well Do Agents Follow the Plan?》**
+Shuyang Liu, Saman Dehghan, Jatin Ganhotra, Martin Hirzel, Reyhaneh Jabbarvand
+[arXiv:2604.12147](https://arxiv.org/abs/2604.12147) · 21,120 条轨迹 · SWE-agent · 4 个模型 · 8 种计划变体
+
+**四条直接相关的发现（原文）：**
+
+| 论文发现 | 对应本项目的什么 |
+|---|---|
+| *"Without an explicit plan, agents fall back on **internalized workflows** during training, which are often **incomplete, overfit, or inconsistently applied**"* | **计划必须显式落盘**（本项目的第 1 条机制） |
+| *"**periodic plan reminders** can **mitigate plan violations** and improve task success"* | **回合锚**（本项目的第 2 条机制）—— 这是它有力的外部依据 |
+| *"A subpar plan hurts performance **even more than no plan at all**"* | 立计划时强制写「怎么算做完」（验收标准），缺了会被点出来 |
+| *"inserting additional task-relevant phases in the early stage **can degrade performance**, particularly when these phases do not align with the model's internal problem-solving strategy"* | **计划演进度量**：把「计划长了多少」变成一个看得见的数字（见下） |
+
+### 关于"计划膨胀"，我们用的是论文的度量公式
+
+论文为了量"agent 跟了多少计划"，定义了三个维度并用**几何平均**汇总：
+
+```
+PC = (PPC · POC · PPF)^(1/3)
+```
+
+原话：*"Geometric mean aggregates sub-metrics multiplicatively, ensuring **equal weighting and preventing compensation** across dimensions."*
+（用几何平均而不是算术平均 —— **一个维度烂，总分就得烂**，避免"某维满分"把"另一维零分"补回来。）
+
+**我们把它整体搬了个位置**：论文量的是「**轨迹 vs 计划**」，我们量「**最初计划 vs 现行计划**」：
+
+| 维度 | 本项目里的含义 |
+|---|---|
+| **PPC′ 覆盖** | 最初的步骤**还有几个活着** |
+| **POC′ 顺序** | 最初步骤的相对顺序**有没有被打乱**（用最长递增子序列，和论文一样） |
+| **PPF′ 保真** | 现行计划里**有多少是原来就有的** |
+| **膨胀率** | `1 − PPF′` |
+
+**判据是稳定的步骤 id**，不是文字比对 —— 所以「4 步变 4 步、其实全换了一批」也能被识别（膨胀率 50%），而只记步数的做法会说"没膨胀"。
+
+> 论文也把立场说清楚了：*"Including additional actions beyond those in the recommended plan is **not necessarily negative, but can be distracting**."*
+> 所以这是**度量**，不是判罪 —— 我们引用它，也是这个用法。
+
 ## 它**不**治什么（请先看这个）
 
 1. **只在 AI 主动申报时有效** —— 它看不见"根本没申报的那件事"
@@ -179,7 +221,7 @@ flowchart TB
 | [`DESIGN.md`](DESIGN.md) | 设计推演：为什么这么设计、证据、被否掉的替代方案 |
 | [`AGENTS.md`](AGENTS.md) | 纪律层（别的宿主可直接当 `rules` / `AGENTS.md` 用） |
 | [`dsh/`](dsh/) | **参考实现**（DSH 插件本体） |
-| [`tests/`](tests/) | **299 项断言** + 极端场景仿真 |
+| [`tests/`](tests/) | **342 项断言** + 极端场景仿真 |
 | [`research/`](research/) | 调研与红队审计（**不含用户原话**） |
 | [`adapters/`](adapters/) | 怎么移植到别的宿主（MCP / Claude Code / Codex） |
 
