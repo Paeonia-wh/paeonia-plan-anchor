@@ -1804,6 +1804,8 @@ function planNote(d, args, scope = "", session = "") {
 	const before = budget(d, plan.id);
 	setBudget(d, plan.id, 0);
 	stSet(d, plan.id, "on_track_note", text);
+	// 声明"我在推进"就等于宣告**等待结束**（唤醒条件已满足）—— 所以顺手清掉等待状态
+	for (const k of ["waiting_what", "waiting_until", "waiting_timeout", "waiting_turns", "waiting_limit", "waiting_step"]) stDel(d, plan.id, k);
 	// 【修·问过就不再问】把当前指纹记为「已答复」—— 锚下次看到同一个指纹时不再重复质问。
 	// 不这样做的后果实测过：我用 plan_note 答了它，下一回合它还是一模一样的质问句，
 	// 于是"质问"自己也变成了墙纸。
@@ -2016,6 +2018,71 @@ function planDetour(d, args, scope = "", session = "") {
 	};
 }
 
+/**
+ * 9i. plan_wait：**「我在等 X」** —— 把"等待"变成一个显式状态，而不是含糊的"在推进"。
+ *
+ * 依据（都是别人踩过的）：
+ *   · `blocked.md`（给 AI agent 写的规范）：*blocked means implementation cannot proceed and
+ *     **only a human can unblock it**. Stop, set status: blocked, and escalate.*
+ *     —— 判据是「**重试也没用**」。这条能把"等待"和"卡住了"分开。
+ *   · agent 状态机实践（bunq）：**Pauses are just "stop and wait for the next API call"**，
+ *     且状态里有显式的 AWAITING_ANSWERS / AWAITING_APPROVAL。
+ *   · Temporal 的人机回路教程：等待用 **Signal**（唤醒条件）+ **Durable Timer**（超时截止）。
+ *
+ * 所以「等待」不是一张标签，而是**三要素 + 两条出边**：
+ *   等谁/等什么 · 什么算等到了 · **超时怎么办**；出边 = ①唤醒 ②超时。
+ *
+ * 两条硬规矩：
+ *   · **等待不涨漂移预算** —— 等外部不是我的错（等自己才是漂移）。
+ *   · **必须写明超时之后干什么** —— 否则"等待"就成了一张免死金牌。
+ */
+function planWait(d, args, scope = "", session = "") {
+	const plan = activePlan(d, scope);
+	if (!plan) return { ok: false, reason: "当前项目没有生效计划。" };
+	const what = (args.what || "").trim();
+	const until = (args.until || "").trim();
+	const onTimeout = (args.on_timeout || "").trim();
+	if (!what || !until) {
+		return {
+			ok: false,
+			reason: "what（在等什么）和 until（什么条件算等到了）**都必须写** ——\n"
+				+ "「在多等一个外部依赖」这种没头没尾的声明，就是给漂移开后门。\n"
+				+ "参照 blocked 的判据：**只有「重试也没用、只能等外部」的事才算等待。**"
+		};
+	}
+	if (!onTimeout) {
+		return {
+			ok: false,
+			reason: "on_timeout（**超时之后怎么办**）必填 —— 等待必须有两条出边：①唤醒 ②超时。\n"
+				+ "BPMN 叫「边界定时器事件」，Temporal 叫「durable timer」，都是同一个东西。\n"
+				+ "少了这条边，等待就变成无限期免死金牌。例如：「超时就先跳过这步、去做别的」。"
+		};
+	}
+	const turns = Math.max(1, Math.min(50, Number(args.timeout_turns ?? 8)));
+	const cur = currentStep(d, plan.id);
+	stSet(d, plan.id, "waiting_what", what);
+	stSet(d, plan.id, "waiting_until", until);
+	stSet(d, plan.id, "waiting_timeout", onTimeout);
+	stSet(d, plan.id, "waiting_turns", "0");
+	stSet(d, plan.id, "waiting_limit", String(turns));
+	stSet(d, plan.id, "waiting_step", String(cur ? cur.id : 0));
+	// 等待期间不该被"停滞质问"打扰 —— 记下当前指纹，锚会认出"这是明知的等待"
+	stSet(d, plan.id, "anchor_ack_sig", anchorSignature(d, plan));
+	stSet(d, plan.id, "anchor_ack_age", "0");
+	setBudget(d, plan.id, 0);
+	log(d, "wait", { planId: plan.id, stepId: cur ? cur.id : 0, ref: "等待", detail: `等：${what}｜等到：${until}｜超时(${turns}回合)：${onTimeout}`, session });
+	return {
+		ok: true,
+		briefing: [
+			`⏸【已进入等待】${what}`,
+			`   唤醒条件：${until}`,
+			`   超时：${turns} 回合 · 超时之后 → ${onTimeout}`,
+			"（等待期间**不涨漂移预算**，也不会被停滞质问打扰 —— 等外部不是你的错。",
+			"  但**超时那条边是实的**：到点它会把你叫回来。用户发言也算一次唤醒。）"
+		].join("\n")
+	};
+}
+
 /** 9. plan_mute：静音提醒 N 次工具调用（防"哭狼来了"，但计划仍在，只是不主动打扰） */
 /** 【第 6 件 · flow mode 式有限豁免】静音不是"关掉护栏"：必须有理由、有硬上限、到期自动恢复并温和 check-in。 */
 function planMute(d, args, scope = "") {
@@ -2101,6 +2168,34 @@ function turnAnchorNotice(d, scope = "") {
 	const dts = detourSteps(d, plan.id);
 	const dtInfo = dts.length ? `｜额外步骤 ${dts.filter((s) => s.status === "done").length}/${dts.length}` : "";
 	const doneN = steps.filter((s) => s.status === "done").length;
+
+	// —— 【等待状态】显式等待优先于一切"停滞"判断 ——
+	//   依据：blocked.md 判据（"重试也没用、只能等外部"）+ Temporal 的 Signal/Timer 两条出边。
+	const wWhat = stGet(d, plan.id, "waiting_what", "");
+	if (wWhat) {
+		const wn = Number(stGet(d, plan.id, "waiting_turns", "0")) + 1;
+		const wlim = Number(stGet(d, plan.id, "waiting_limit", "8"));
+		const wUntil = stGet(d, plan.id, "waiting_until", "");
+		const wTo = stGet(d, plan.id, "waiting_timeout", "");
+		if (wn > wlim) {
+			// ⏰ 第二条边：超时 —— 把它叫回来，并且提醒"当初说好怎么办"
+			for (const k of ["waiting_what", "waiting_until", "waiting_timeout", "waiting_turns", "waiting_limit", "waiting_step"]) stDel(d, plan.id, k);
+			stDel(d, plan.id, "anchor_ack_sig");
+			return notice([
+				`⏰【计划锚】**你等的「${wWhat}」已经 ${wn} 回合没动静了。**`,
+				`   唤醒条件：${wUntil}`,
+				`   当初说好超时之后：**${wTo}**`,
+				"",
+				"现在按当初说好的办，别继续干等。",
+				"（等待有两条出边：**唤醒** 或 **超时**。你现在走到超时这边了。想继续等 → 再 plan_wait 一次并重新说明。）"
+			].join("\n"), "plan anchor (wait timed out)");
+		}
+		stSet(d, plan.id, "waiting_turns", String(wn));
+		return notice(
+			`⏸【计划锚】在等：${wWhat}｜等到：${wUntil}｜第 ${wn}/${wlim} 回合${cur ? `｜（第 ${cur.ord} 步挂着）` : ""}`,
+			"plan anchor (waiting)"
+		);
+	}
 
 	// —— 自适应（①）：指纹没变就别说同样的话 ——
 	const sig = anchorSignature(d, plan);
@@ -2534,6 +2629,17 @@ function apply(ctx, config) {
 				what: { type: "string", required: true, description: "要做的**具体动作**与影响（泛泛地问会被拒）" }
 			},
 			exec: (a, x) => planAsk(d, a, scopeOf(x), sessionKeyOf(x && x.agent))
+		},
+		{
+			name: "plan_wait",
+			description: "「我在等 X」—— 把等待变成显式状态。三要素必填：what（等什么）/ until（什么算等到了）/ on_timeout（超时怎么办）。等待期间不涨漂移预算，也不会被停滞质问打扰。只用于「重试也没用、只能等外部」的事。",
+			params: {
+				what: { type: "string", description: "必填。在等什么" },
+				until: { type: "string", description: "必填。什么条件算等到了（唤醒条件）" },
+				on_timeout: { type: "string", description: "必填。超时之后怎么办（不能没有这条边）" },
+				timeout_turns: { type: "number", description: "多少回合算超时（默认 8，上限 50）" }
+			},
+			exec: (a, x) => withRefs(d, a, scopeOf(x), (dd, aa, sc) => planWait(dd, aa, sc, sessionKeyOf(x && x.agent)))
 		},
 		{
 			name: "plan_detour",

@@ -1124,5 +1124,39 @@ check('（plan_detour）做完自动回到主线', r.text.includes('自动回到
 r = await callIn('plan_detour', {}, execAO);
 check('（plan_detour）不写 text 被拒', r.refused && r.text.includes('text 必填'), r.text.slice(0, 160));
 
+console.log(`\n--- 60. 【等待状态】三要素 + 两条出边（唤醒 / 超时）---`);
+const execAP = mkExec('D:\\projAP');
+await callIn('plan_set', { title: 'AP 计划', steps: ['AP1 主线一步'] }, execAP);
+// 三要素缺一不可
+r = await callIn('plan_wait', { what: '等用户决定' }, execAP);
+check('（等待）只写 what 被拒，且点明"只有重试没用的事才算等待"', r.refused && r.text.includes('重试也没用'), r.text.slice(0, 200));
+r = await callIn('plan_wait', { what: '等用户决定', until: '用户回话' }, execAP);
+check('（等待）缺 on_timeout 被拒，且点明"必须有两条出边"', r.refused && r.text.includes('两条出边'), r.text.slice(0, 220));
+check('（等待）并给出 BPMN/Temporal 的出处', r.text.includes('BPMN') && r.text.includes('Temporal'), r.text.slice(0, 300));
+// 三要素齐全
+r = await callIn('plan_wait', { what: '等用户决定仓库标签', until: '用户回话', on_timeout: '先跳过，继续做别的', timeout_turns: 3 }, execAP);
+check('（等待）三要素齐全即接受', !r.refused && r.text.includes('已进入等待'), r.text.slice(0, 200));
+check('（等待）回执列出唤醒条件与超时动作', r.text.includes('用户回话') && r.text.includes('先跳过'), r.text.slice(0, 260));
+check('（等待）明说不涨漂移预算', r.text.includes('不涨漂移预算'), r.text.slice(0, 300));
+// 等待期间锚显示等待态，且不出现停滞质问
+const w1 = await (async () => { await userSays(execAP, '继续'); const inj = await fireIn('read', { file_path: 'ap.js' }, execAP); return noticeText(inj); })();
+check('（等待）锚显示 ⏸ 等待态与回合数', w1.includes('在等：') && w1.includes('回合'), w1.slice(0, 200));
+check('（等待）等待期间不出现停滞质问', !w1.includes('没有任何变化'), w1.slice(0, 200));
+// 跑到超时
+let timedOut = '';
+for (let i = 0; i < 6; i++) {
+  await userSays(execAP, '继续');
+  const out = noticeText(await fireIn('read', { file_path: 'ap.js' }, execAP));
+  if (out.includes('没动静了')) { timedOut = out; break; }
+}
+check('（超时·第二条边）到点把 agent 叫回来', timedOut.includes('没动静了'), timedOut.slice(0, 200));
+check('（超时）提醒当初说好的超时动作', timedOut.includes('先跳过'), timedOut.slice(0, 260));
+check('（超时）并说明两条出边', timedOut.includes('两条出边') || timedOut.includes('超时这边'), timedOut.slice(0, 320));
+// 等待可用 plan_note 解除（声明在推进 = 等待结束）
+await callIn('plan_wait', { what: '等 X', until: 'Y 到', on_timeout: '跳过' }, execAP);
+await callIn('plan_note', { text: '条件到了，我继续做' }, execAP);
+const w2 = await (async () => { await userSays(execAP, '继续'); const inj = await fireIn('read', { file_path: 'ap.js' }, execAP); return noticeText(inj); })();
+check('（唤醒）plan_note 解除等待（声明在推进 = 等待结束）', !w2.includes('在等：'), w2.slice(0, 180));
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
