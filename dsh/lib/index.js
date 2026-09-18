@@ -1148,10 +1148,65 @@ function planStepDone(d, args, scope = "", session = "") {
  */
 const DISPOSITIONS = ["permit", "defer", "decline"];
 
+/**
+ * 【紧急闸门】severity="urgent" 的发现，**判定权不在 agent 手上**。
+ *
+ * 为什么要有这道闸门（用户加的规矩，一针见血）：
+ *   「紧急」是**最容易被滥用的借口** —— 谁能宣布紧急，谁就能随时打断计划、插队。
+ *   而受益者是 agent 自己（它可以不按计划走）。**受益者不该同时是裁判。**
+ *
+ * 三条规矩：
+ *   1. **紧急必须给理由**（拖延的代价是什么）—— 没有理由的"紧急"就是"我想做"。
+ *   2. **紧急 ≠ 我想做** —— 必须是**可陈述的代价**：数据会丢 / 安全问题 / 堵住别人。
+ *   3. **必须问用户** —— 同意才生效（两步式：先问，再带 user_approved 调）。
+ *
+ * 判据借用我们已引用的 Horvitz 期望值：**打断的代价 vs 拖延的代价**，谁大听谁的。
+ * 但"谁大"这个判断，对"紧急"这一档，不由 agent 单独下。
+ */
+function urgentGate(d, args, plan, cur) {
+	const text = (args.text || "").trim();
+	const reason = (args.reason || "").trim();
+	if (!reason) {
+		return {
+			ok: false,
+			reason: "⛔ **紧急必须给理由**：拖延的代价是什么？\n"
+				+ "没有理由的「紧急」就等于「我想做」—— 那条路不能开。\n"
+				+ "可陈述的代价例如：数据会丢 / 有安全风险（如 token 泄露）/ 会堵住别人的工作。"
+		};
+	}
+	if (!args.user_approved) {
+		const ask = "「我发现一个紧急问题：" + text + "。拖延的代价是：" + reason + "。"
+			+ "它会打断当前第 " + (cur ? cur.ord : "-") + " 步（" + (cur ? cur.text : "无") + "）。"
+			+ "要现在停下主线去修它吗？」";
+		return {
+			ok: false,
+			reason: [
+				"⏸ **紧急 = 要求打断计划 → 这个判定权不在你手上。**",
+				"   发现：" + text,
+				"   拖延的代价：" + reason,
+				cur ? "   它会打断当前：第 " + cur.ord + " 步「" + cur.text + "」" : "",
+				"",
+				"**先问用户**，把这个问句照抄给他（不要改意思）：",
+				"   " + ask,
+				"",
+				"用户同意后，带 user_approved: true 再调一次，才会生效（并记进台账：谁批准的）。",
+				"（为什么这么设计：紧急是最容易被滥用的借口 —— 谁能宣布紧急，谁就能随时插队。",
+				"  受益者不该同时是裁判。）"
+			].filter(Boolean).join("\n")
+		};
+	}
+	return null;
+}
+
 function planDiscover(d, args, scope = "") {
 	const plan = activePlan(d, scope);
 	if (!plan) {
 		return { ok: false, reason: "没有生效计划。先 plan_set 立计划（哪怕只写 3 步），否则新问题会直接把主线冲掉。" };
+	}
+	// 【紧急闸门】「紧急」是要求打断计划 → 判定权不在 agent 手上
+	if (args.severity === "urgent") {
+		const _g = urgentGate(d, args, plan, currentStep(d, plan.id));
+		if (_g) return _g;
 	}
 	const text = (args.text || "").trim();
 	if (!text) return { ok: false, reason: "text 不能为空：一句话写清这个新发现的问题" };
@@ -2634,6 +2689,9 @@ function apply(ctx, config) {
 			description: "执行中发现新问题 → **必须显式判定处置**：permit（阻塞当前步，现在做）/ defer（现在不做，入泊位）/ decline（判定不做）。三值不可省略，新问题不许含糊地留在半空。",
 			params: {
 				text: { type: "string", required: true, description: "一句话写清这个新发现的问题" },
+				severity: { type: "string", description: "普通就不填。填 urgent = 「要求打断计划」：必须同时给 reason（拖延的代价），且必须经用户批准（先不带 user_approved 调一次拿到问句；同意后再带 user_approved: true 调）" },
+				reason: { type: "string", description: "severity=urgent 时必填：拖延的代价是什么（数据会丢 / 安全风险 / 堵住别人）。紧急 ≠ 我想做" },
+				user_approved: { type: "boolean", description: "severity=urgent 时必填：用户是否已同意打断计划" },
 				disposition: { type: "string", description: "必填。permit | defer | decline；没想清楚就选 defer（入泊不会丢）" },
 				resume_when: { type: "string", description: "选 defer 时必填：到时候凭什么判断该回来看它了（如「第 4 步做完之后」）" },
 				resume_after_ord: { type: "number", description: "选 defer 时可选：主线第几步做完后回来（内部会换算成步骤身份；序号顺延也不会指错）" },
