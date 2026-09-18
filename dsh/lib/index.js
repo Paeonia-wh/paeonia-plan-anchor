@@ -2008,7 +2008,32 @@ function notice(text, summary) {
 	return Object.freeze(message);
 }
 
-/** 回合锚：每个用户回合的第一次工具调用后，把计划放回眼前（一行，token 极省）。 */
+/**
+ * 锚的"状态指纹"：只含**真正该让人看见的变化**（版本、进度、当前步、泊位）。
+ * 预算故意不算 —— 预算在涨而别的没动，恰恰是"卡住了"，那才更该说话。
+ */
+function anchorSignature(d, plan) {
+	const steps = planSteps(d, plan.id);
+	const cur = currentStep(d, plan.id);
+	const dts = detourSteps(d, plan.id);
+	return [
+		plan.version,
+		`${steps.filter((s) => s.status === "done").length}/${steps.length}`,
+		cur ? `${cur.kind}:${cur.ord}:${cur.id}` : "none",
+		openParking(d, plan.id).length,
+		`${dts.filter((s) => s.status === "done").length}/${dts.length}`
+	].join("|");
+}
+
+/**
+ * 连续多少回合"指纹"不变，就不再复读同一句，改成**质问**。
+ * 为什么要有这个：实测本插件的锚连续十几回合一模一样，结果作者本人都开始无视它 ——
+ * **一个只重复的提醒，无论多重要，第 10 次之后都会失效。** 它变成了墙纸。
+ * 提醒的价值不在"说了什么"，在**"它变了没有"**。
+ */
+const ANCHOR_STALE_AT = 3;
+
+/** 回合锚：每个用户回合的第一次工具调用后，把计划放回眼前。**内容会自适应：变了给全的，没变缩短，一直没变就质问。** */
 function turnAnchorNotice(d, scope = "") {
 	const plan = activePlan(d, scope);
 	if (!plan) return null;
@@ -2017,7 +2042,36 @@ function turnAnchorNotice(d, scope = "") {
 	const park = openParking(d, plan.id).length;
 	const dts = detourSteps(d, plan.id);
 	const dtInfo = dts.length ? `｜额外步骤 ${dts.filter((s) => s.status === "done").length}/${dts.length}` : "";
-	const bits = [`【计划锚】${plan.title}｜主线 ${steps.filter((s) => s.status === "done").length}/${steps.length} 步${dtInfo}`];
+	const doneN = steps.filter((s) => s.status === "done").length;
+
+	// —— 自适应（①）：指纹没变就别说同样的话 ——
+	const sig = anchorSignature(d, plan);
+	const prevSig = stGet(d, plan.id, "anchor_sig", "");
+	const n = prevSig === sig ? Number(stGet(d, plan.id, "anchor_sig_n", "0")) + 1 : 1;
+	stSet(d, plan.id, "anchor_sig", sig);
+	stSet(d, plan.id, "anchor_sig_n", String(n));
+
+	if (n >= ANCHOR_STALE_AT) {
+		// 连续没变化 → 不再复读，改成质问（这条会每回合都在，直到状态真的变化）
+		return notice([
+			`⚠【计划锚】**计划已经 ${n} 回合没有任何变化** —— 还停在这里：`,
+			cur ? `   第 ${cur.ord} 步「${cur.text}」（主线 ${doneN}/${steps.length}）` : `   主线无进行中步骤（${doneN}/${steps.length}）`,
+			park ? `   另有 ${park} 条欠账挂着。` : "",
+			"这是**真的在推进**，还是**卡住了**？三选一：",
+			"  · 在推进 → `plan_note` 说一句进展（预算清零）",
+			"  · 卡住了 → `plan_discover` 处置，或 `plan_amend` 改这一步",
+			"  · 不想做了 → `plan_drop` 丢掉它 / `plan_set` 换计划"
+		].filter(Boolean).join("\n"), "plan anchor (stalled)");
+	}
+	if (n > 1) {
+		// 上回合变过、这回合没变 → 缩成一行
+		return notice(
+			`【计划锚】${plan.title}｜${doneN}/${steps.length} 步${cur ? `｜第 ${cur.ord} 步` : ""}${park ? `｜泊位 ${park}` : "｜泊位空"}（与上回合相同，已缩短）`,
+			"plan anchor (compact)"
+		);
+	}
+
+	const bits = [`【计划锚】${plan.title}｜主线 ${doneN}/${steps.length} 步${dtInfo}`];
 	if (cur && cur.kind === "detour") {
 		const r = stGet(d, plan.id, "resume_step");
 		const rs = r ? stepById(d, Number(r)) : null;
@@ -2134,7 +2188,9 @@ function isFileMutating(toolName) {
 // 另有**一处相对原计划的改动**：命中"追加需求"时**不去问用户**（"顺便把 X 改了"本来就是要做，再问是多余摩擦），
 // 而是提示 agent **按纪律显式处置**。
 
-const RX_INTERRUPT = /(等一下|等下|停一下|先停|先别|先不|打住|暂停|慢着|别急)/;
+// 【泊位 6】`先不` 会吃掉「先不管 / 先不说 / 先不提 / 先不用」——那是"暂时不管某件事"，
+// 不是"叫你停"。实测被误报过两次（"卖点的话先不管"、"先不用等一下"）。
+const RX_INTERRUPT = /(等一下|等下|停一下|先停|先别|先不(?!管|说|提|用)|打住|暂停|慢着|别急)/;
 const RX_PROGRESS = /(做到哪|干到哪|进行到哪|走到哪)/;
 const RX_SUMMARY = /(整理|梳理|汇总|总结|归纳|列一下|列出来|理一下)/;
 const RX_CONFUSED = /(混乱|有点乱|很乱|太乱|绕晕|晕了|懵|搞乱|搞混|弄混|乱套|忘记|忘了|记不清|不记得)/;

@@ -1020,5 +1020,35 @@ check('（④）泊位显示为「泊位 N」而不是 #数据库id', /泊位 \d
 r = await callIn('plan_close', { park_ord: 1, reason: '按序号关闭', outcome: 'resolved' }, execAH, true);
 check('（④）park_ord 按序号关闭可用', !r.refused, r.text.slice(0, 160));
 
+console.log(`\n--- 53. 【锚的自适应】不变就缩短、一直不变就质问（别当墙纸） ---`);
+const execAI = mkExec('D:\\projAI');
+await callIn('plan_set', { title: 'AI 计划', steps: ['AI1', 'AI2'] }, execAI);
+const anchorOf = async () => {
+  await userSays(execAI, '继续');
+  const inj = await fireIn('read', { file_path: 'ai.js' }, execAI);
+  return noticeText(inj);
+};
+const a1 = await anchorOf();
+check('（①）第 1 次：给完整锚', a1.includes('主线第 1 步') && !a1.includes('与上回合相同'), a1.slice(0, 120));
+const a2 = await anchorOf();
+check('（①）第 2 次没变化：缩成一行', a2.includes('与上回合相同'), a2.slice(0, 120));
+const a3 = await anchorOf();
+check('（①）连续没变化：不再复读，改成质问', a3.includes('回合没有任何变化') && a3.includes('真的在推进'), a3.slice(0, 200));
+check('（①）质问里给出三条出路', a3.includes('plan_note') && a3.includes('plan_discover') && a3.includes('plan_drop'), a3.slice(0, 320));
+await fireIn('write', { file_path: 'ai.txt', content: 'x' }, execAI);
+await callIn('plan_step_done', { evidence: 'AI1 做完了' }, execAI);
+const a4 = await anchorOf();
+check('（①）计划一有变化：立刻回到完整锚（不再质问）', !a4.includes('与上回合相同') && !a4.includes('没有任何变化'), a4.slice(0, 160));
+
+console.log(`\n--- 54. 【泊位 6】「先不管」不再被当成叫停 ---`);
+const execAJ = mkExec('D:\\projAJ');
+await callIn('plan_set', { title: 'AJ 计划', steps: ['AJ1'] }, execAJ);
+await userSays(execAJ, '卖点的话先不管，我们先把东西确定好');
+let injJ = await fireIn('read', { file_path: 'aj.js' }, execAJ);
+check('（③）「先不管」不再触发"他在叫你停"', !noticeText(injJ).includes('叫你停'), noticeText(injJ).slice(0, 140));
+await userSays(execAJ, '先不清理，你把我桌面整理一下');
+injJ = await fireIn('read', { file_path: 'aj2.js' }, execAJ);
+check('（③）真正的「先不清理」仍然触发叫停', noticeText(injJ).includes('叫你停'), noticeText(injJ).slice(0, 140));
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
