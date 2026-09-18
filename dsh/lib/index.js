@@ -2058,7 +2058,16 @@ function turnAnchorNotice(d, scope = "") {
 	if (n >= ANCHOR_STALE_AT) {
 		// 【问过就不再问】如果这个指纹已经被答复过（plan_note 声明在轨），就别再问第二遍 ——
 		// 否则"质问"会和"复读"一样退化成墙纸。等状态真的变了（指纹变）自然会重新开口。
-		if (stGet(d, plan.id, "anchor_ack_sig", "") === sig) return null;
+		// 【关键修正】不再**质问**，但**锚必须还在** —— "闭嘴"和"消失"是两回事：
+		// 该闭嘴的是催问（噪声），绝不能消失的是锚本身（那是这工具存在的理由）。
+		// 我第一版写成 return null（连锚都不注入），那是把"别唠叨"做成了"别出现"，是错的。
+		if (stGet(d, plan.id, "anchor_ack_sig", "") === sig) {
+			const tail = cur ? `｜第 ${cur.ord} 步` : "";
+			return notice(
+				`【计划锚】${plan.title}｜${doneN}/${steps.length} 步${tail}${park ? `｜泊位 ${park}` : ""}（已声明在轨，不再追问）`,
+				"plan anchor (acked)"
+			);
+		}
 		return notice([
 			`⚠【计划锚】**计划已经 ${n} 回合没有任何变化** —— 还停在这里：`,
 			cur ? `   第 ${cur.ord} 步「${cur.text}」（主线 ${doneN}/${steps.length}）` : `   主线无进行中步骤（${doneN}/${steps.length}）`,

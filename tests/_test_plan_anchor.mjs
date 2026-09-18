@@ -1087,7 +1087,7 @@ check('（前置）连续 3 回合没变 → 出现质问', q3.includes('回合�
 await callIn('plan_note', { text: '我在做别的事，这一步在等外部依赖' }, execAM);
 const q4 = await anchorAM();
 check('（修复）答复之后不再重复同一句质问', !q4.includes('回合没有任何变化'), q4.slice(0, 120));
-check('（修复）此时干脆保持安静（不再注入锚）', q4 === '' || !q4.includes('【计划锚】'), q4.slice(0, 120));
+check('（修复）不再质问，但**锚仍然在**（闭嘴≠消失）', q4.includes('【计划锚】') && q4.includes('已声明在轨'), q4.slice(0, 170));
 await fireIn('write', { file_path: 'am.txt', content: 'x' }, execAM);
 await callIn('plan_step_done', { evidence: 'AM1 完成' }, execAM);
 const q5 = await anchorAM();
