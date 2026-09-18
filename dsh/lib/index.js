@@ -1632,10 +1632,13 @@ function parseStepList(raw) {
 				text: String(s.text ?? "").trim(),
 				acceptance: String(s.acceptance ?? "").trim(),
 				files: Array.isArray(s.files) ? s.files.map((x) => String(x)).filter(Boolean) : [],
-				commands: Array.isArray(s.commands) ? s.commands.map((x) => String(x)).filter(Boolean) : []
+				commands: Array.isArray(s.commands) ? s.commands.map((x) => String(x)).filter(Boolean) : [],
+				// 【验收步】kind:"accept" = **请用户看的**，不是要做的活（空着就是普通工作步）。
+				// 之前解析器把它丢了，导致标记不上（测试 65 抓到）。
+				kind: (s.kind === "accept" || s.verify === true) ? "accept" : "plan"
 			};
 		}
-		return { text: String(s ?? "").trim(), acceptance: "", files: [], commands: [] };
+		return { text: String(s ?? "").trim(), acceptance: "", files: [], commands: [], kind: "plan" };
 	}).filter((s) => s.text);
 }
 
@@ -2357,6 +2360,10 @@ function turnAnchorNotice(d, scope = "") {
 	const dts = detourSteps(d, plan.id);
 	const dtInfo = dts.length ? `｜额外步骤 ${dts.filter((s) => s.status === "done").length}/${dts.length}` : "";
 	const doneN = steps.filter((s) => s.status === "done").length;
+	// 【验收步】提前算好 —— **缩短版也要带它**。
+	// 用户当场指出："缩短版的锚没带我验收的那个" —— 缩短只该省掉冗余措辞，
+	// 不该把"有事等你"这个信息省掉（信息存在 ≠ 可见，这是今天第 N 次踩）。
+	const acc = acceptSteps(d, plan.id).filter((s) => s.status !== "done");
 
 	// —— 【等待状态】显式等待优先于一切"停滞"判断 ——
 	//   依据：blocked.md 判据（"重试也没用、只能等外部"）+ Temporal 的 Signal/Timer 两条出边。
@@ -2449,7 +2456,7 @@ function turnAnchorNotice(d, scope = "") {
 	if (n > 1) {
 		// 上回合变过、这回合没变 → 缩成一行
 		return notice(
-			`【计划锚】${plan.title}｜${doneN}/${steps.length} 步${cur ? `｜第 ${cur.ord} 步` : ""}${park ? `｜泊位 ${park}` : "｜泊位空"}（与上回合相同，已缩短）`,
+			`【计划锚】${plan.title}｜${doneN}/${steps.length} 步${cur ? `｜第 ${cur.ord} 步` : ""}${acc.length ? `｜👁 待你验收 ${acc.length} 项` : ""}${park ? `｜泊位 ${park}` : "｜泊位空"}（与上回合相同，已缩短）`,
 			"plan anchor (compact)"
 		);
 	}
@@ -2457,7 +2464,6 @@ function turnAnchorNotice(d, scope = "") {
 	// 【分两块】工作步骤（agent 做）与验收步骤（**请用户看**）混在一起显示过 ——
 	// 用户当场指出："感觉我们现在也没在做这个吧"（他以为"看我先表态"是要干的活）。
 	// 所以进度只算工作步骤，验收单独一节。
-	const acc = acceptSteps(d, plan.id).filter((s) => s.status !== "done");
 	const bits = [`【计划锚】${plan.title}｜主线 ${doneN}/${steps.length} 步${dtInfo}`];
 	if (cur && cur.kind === "detour") {
 		const r = stGet(d, plan.id, "resume_step");

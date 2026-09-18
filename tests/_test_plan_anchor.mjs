@@ -1246,5 +1246,15 @@ await fireIn('plan_detour', { text: '给 AV 加个小改动', reason: '用户刚
 const n4 = await fireIn('write', { file_path: 'av.txt', content: 'x' }, execAV);
 check('（对照）先碰过计划工具，就不再提醒', !noticeText(n4).includes('记账提醒'), noticeText(n4).slice(0, 220));
 
+console.log(`\n--- 65. 【缩短版也要带"待你验收"】 ---`);
+const execAX = mkExec('D:\\projAX');
+await callIn('plan_set', { title: 'AX 计划', steps: ['AX1 工作步', { text: '请你看一下表现', kind: 'accept' }] }, execAX);
+const ancX = async () => { await userSays(execAX, '继续'); const inj = await fireIn('read', { file_path: 'ax.js' }, execAX); return noticeText(inj); };
+const c1x = await ancX();
+check('（验收步）步骤被标为验收步，不进工作步分母', c1x.includes('0/1 步'), c1x.slice(0, 160));
+check('（验收步）完整锚里有"待你验收"', c1x.includes('待你验收 1 项'), c1x.slice(0, 220));
+const c2x = await ancX();
+check('（缩短版）缩短之后**仍然**带"待你验收"', c2x.includes('已缩短') && c2x.includes('待你验收 1 项'), c2x.slice(0, 220));
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
