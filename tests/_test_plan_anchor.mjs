@@ -1061,5 +1061,21 @@ await userSays(execAK, '停一下');
 const injK2 = await fireIn('read', { file_path: 'ak2.js' }, execAK);
 check('（对照）当回合的信号仍然照常触发', noticeText(injK2).includes('叫你停'), noticeText(injK2).slice(0, 160));
 
+console.log(`\n--- 56. 【误报】先别/先不 的"跳过某话题"与"引用这个词"都不算叫停 ---`);
+const execAL = mkExec('D:\\projAL');
+await callIn('plan_set', { title: 'AL 计划', steps: ['AL1'] }, execAL);
+const sayCheck = async (text, shouldStop, label) => {
+  await userSays(execAL, text);
+  const out = await fireIn('read', { file_path: 'al.js' }, execAL);
+  const got = noticeText(out).includes('叫你停');
+  check(label, got === shouldStop, `期望${shouldStop ? '叫停' : '不叫停'}，实际${got ? '叫停' : '不叫停'}｜«${text}»`);
+};
+await sayCheck('没事你先别管这个ppt，先告诉我风格', false, '（先别管）跳过话题 ≠ 叫停');
+await sayCheck('先别看代码，先说思路', false, '（先别看）跳过话题 ≠ 叫停');
+await sayCheck('就是那个先别的那个事情你好像没修吧', false, '（引用）"先别"后面跟「的」= 在提这个词，不是下指令');
+await sayCheck('先不说这个，你先把图给我', false, '（先不说）跳过话题 ≠ 叫停');
+await sayCheck('你先别急着改', true, '（对照）真正的「先别急」仍然叫停');
+await sayCheck('先别做那个，我们换个方向', true, '（对照）真正的「先别做」仍然叫停');
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
