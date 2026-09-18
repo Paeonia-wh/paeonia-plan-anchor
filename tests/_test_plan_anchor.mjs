@@ -1029,7 +1029,7 @@ const anchorOf = async () => {
   return noticeText(inj);
 };
 const a1 = await anchorOf();
-check('（①）第 1 次：给完整锚', a1.includes('主线第 1 步') && !a1.includes('与上回合相同'), a1.slice(0, 120));
+check('（①）第 1 次：给完整锚', a1.includes('要做：第 1 步') && !a1.includes('与上回合相同'), a1.slice(0, 120));
 const a2 = await anchorOf();
 check('（①）第 2 次没变化：缩成一行', a2.includes('与上回合相同'), a2.slice(0, 120));
 const a3 = await anchorOf();

@@ -252,8 +252,20 @@ function currentStep(d, planId) {
 	return id ? stepById(d, Number(id)) : null;
 }
 function planSteps(d, planId) {
-	// 只返回"活着"的主线步骤（不含被 drop 的）：总数 n、找下一个待办都该用它
+	// 只返回"活着"的**工作**步骤（不含被 drop 的、不含验收步）：总数 n、找下一个待办都该用它
+	// 【为什么要分开】验收步是"请用户看 agent 的表现"，不是要干的活 ——
+	// 把它混进进度分母会让用户看到"第 32 步"以为有活要做（用户当场指出过这个问题）。
 	return d.prepare("SELECT * FROM steps WHERE plan_id = ? AND kind = 'plan' AND status != 'dropped' ORDER BY ord ASC").all(planId);
+}
+
+/** 验收步骤（kind='accept'）：**请用户看的**，不是要做的活。单独一节显示。 */
+function acceptSteps(d, planId) {
+	return d.prepare("SELECT * FROM steps WHERE plan_id = ? AND kind = 'accept' AND status != 'dropped' ORDER BY ord ASC").all(planId);
+}
+
+/** 所有"活着"的步骤（工作 + 验收），给需要全量视图的地方用。 */
+function allSteps(d, planId) {
+	return d.prepare("SELECT * FROM steps WHERE plan_id = ? AND kind IN ('plan','accept') AND status != 'dropped' ORDER BY ord ASC").all(planId);
 }
 /** 含已丢弃的主线步骤（只给显示用，好让"这里原本有一步"看得见）。 */
 function planStepsAll(d, planId) {
@@ -821,9 +833,9 @@ function planSet(d, args, scope = "") {
 		// 旧计划里"活着"的步骤没有被继承 —— 必须**明说**，不能静默丢掉（这正是 plan_set 的代价）
 		orphaned = planSteps(d, prev.id).map((s) => ({ ord: s.ord, text: s.text, done: s.status === "done" }));
 	}
-	const ins = d.prepare("INSERT INTO steps (plan_id, ord, text, kind, acceptance, scope_files, scope_commands, status) VALUES (?,?,?,'plan',?,?,?,'pending')");
+	const ins = d.prepare("INSERT INTO steps (plan_id, ord, text, kind, acceptance, scope_files, scope_commands, status) VALUES (?,?,?,?,?,?,?,'pending')");
 	const ids = parsed.map((s, i) => Number(
-		ins.run(planId, i + 1, s.text, s.acceptance, JSON.stringify(s.files), JSON.stringify(s.commands)).lastInsertRowid
+		ins.run(planId, i + 1, s.text, (s.kind === "accept" || s.verify) ? "accept" : "plan", s.acceptance, JSON.stringify(s.files), JSON.stringify(s.commands)).lastInsertRowid
 	));
 
 	// ---- 显式映射（carry）：把旧计划的步骤关系声明清楚，而不是让它们无声消失 ----
@@ -1721,9 +1733,9 @@ function planInsert(d, args, scope = "") {
 	const willShift = d.prepare("SELECT id, ord, text FROM steps WHERE plan_id=? AND kind='plan' AND ord > ? ORDER BY ord")
 		.all(plan.id, afterOrd);
 	d.prepare("UPDATE steps SET ord = ord + ? WHERE plan_id = ? AND kind = 'plan' AND ord > ?").run(parsed.length, plan.id, afterOrd);
-	const ins = d.prepare("INSERT INTO steps (plan_id, ord, text, kind, acceptance, scope_files, scope_commands, status) VALUES (?,?,?,'plan',?,?,?,'pending')");
+	const ins = d.prepare("INSERT INTO steps (plan_id, ord, text, kind, acceptance, scope_files, scope_commands, status) VALUES (?,?,?,?,?,?,?,'pending')");
 	const newIds = parsed.map((s, i) => Number(
-		ins.run(plan.id, afterOrd + 1 + i, s.text, s.acceptance, JSON.stringify(s.files), JSON.stringify(s.commands)).lastInsertRowid
+		ins.run(plan.id, afterOrd + 1 + i, s.text, (s.kind === "accept" || s.verify) ? "accept" : "plan", s.acceptance, JSON.stringify(s.files), JSON.stringify(s.commands)).lastInsertRowid
 	));
 	const shifts = willShift.map((s) => `「${s.text.slice(0, 12)}」第${s.ord}→第${s.ord + parsed.length}步`);
 	const moved = [...shifts, ...renumber(d, plan.id)];
@@ -2431,16 +2443,23 @@ function turnAnchorNotice(d, scope = "") {
 		);
 	}
 
+	// 【分两块】工作步骤（agent 做）与验收步骤（**请用户看**）混在一起显示过 ——
+	// 用户当场指出："感觉我们现在也没在做这个吧"（他以为"看我先表态"是要干的活）。
+	// 所以进度只算工作步骤，验收单独一节。
+	const acc = acceptSteps(d, plan.id).filter((s) => s.status !== "done");
 	const bits = [`【计划锚】${plan.title}｜主线 ${doneN}/${steps.length} 步${dtInfo}`];
 	if (cur && cur.kind === "detour") {
 		const r = stGet(d, plan.id, "resume_step");
 		const rs = r ? stepById(d, Number(r)) : null;
 		bits.push(`在做额外步骤 ${cur.detour_no}：${cur.text}${rs ? `（主线第 ${rs.ord} 步已挂起）` : ""}`);
 	} else if (cur) {
-		bits.push(`主线第 ${cur.ord} 步：${cur.text}`);
+		bits.push(`要做：第 ${cur.ord} 步 ${cur.text}`);
+	} else if (acc.length) {
+		bits.push("✔ 要做的工作步骤都做完了");
 	} else {
 		bits.push("主线无进行中步骤");
 	}
+	if (acc.length) bits.push(`👁 待你验收 ${acc.length} 项：${acc.map((s) => s.text).join("；")}`);
 	// 【计划演进】按论文三维公式算（见 planInflation 的注释）
 	const _inf = planInflation(d, plan.id);
 	if (_inf && !(_inf.birth === _inf.now && _inf.kept === _inf.birth)) {
