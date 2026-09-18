@@ -278,6 +278,26 @@ function progressText(done, total) {
 	return `工作步 ${done}/${total} 完成`;
 }
 
+/**
+ * 【单一来源】"当前没有生效计划"的统一说法。
+ *
+ * 审计发现（audit-dup.mjs）：这句话在代码里**手写了 14 遍**，而且措辞已经漂了 ——
+ * 10 处写「当前项目没有生效计划…」、4 处写「没有生效计划…」。
+ * 这就是"改一处漏一处"的必然原因：同一个语义散在 14 个地方，改不干净是常态。
+ * 收敛成一个函数后，改说法只需改这里。
+ */
+/** 【单一来源】台账/回执里"理由已记录"的统一写法（审计发现有 8 处手写）。 */
+function reasonLine(reason) {
+	return reason ? `理由已记录：${reason}` : "";
+}
+
+function noPlanError(hint) {
+	return {
+		ok: false,
+		reason: "当前项目没有生效计划。" + (hint || "先 plan_set 立计划（哪怕只写 3 步），否则新问题会直接把主线冲掉。")
+	};
+}
+
 function planSteps(d, planId) {
 	// 只返回"活着"的**工作**步骤（不含被 drop 的、不含验收步）：总数 n、找下一个待办都该用它
 	// 【为什么要分开】验收步是"请用户看 agent 的表现"，不是要干的活 ——
@@ -1245,7 +1265,7 @@ function urgentGate(d, args, plan, cur) {
 function planDiscover(d, args, scope = "") {
 	const plan = activePlan(d, scope);
 	if (!plan) {
-		return { ok: false, reason: "没有生效计划。先 plan_set 立计划（哪怕只写 3 步），否则新问题会直接把主线冲掉。" };
+		return noPlanError();
 	}
 	// 【紧急闸门】「紧急」是要求打断计划 → 判定权不在 agent 手上
 	if (args.severity === "urgent") {
@@ -1439,7 +1459,7 @@ function planGoto(d, args, scope = "") {
 			detour_budget: detourBudget,
 			briefing: [
 				`【已提取${parkLabel(d, p)} → 记为额外步骤 ${dNo}】${p.text}`,
-				`理由已记录：${reason}`,
+				reasonLine(reason),
 				cur && cur.kind === "plan" ? `主线第 ${cur.ord} 步「${cur.text}」已挂起，做完 plan_step_done 会**自动回到主线第 ${cur.ord} 步**。` : "",
 				"...but 提醒：这是**计划外的工作**，台账已留痕。",
 				over ? `⚠ 偏离额度已超支（第 ${detourUsed(d, plan.id)} 次 / 额度 ${detourBudget}）。不禁止你继续，但这笔代价会一直显示在锚上，直到你完成一个计划步骤。` : `偏离额度：${detourUsed(d, plan.id)}/${detourBudget}。`
@@ -1732,7 +1752,7 @@ function planAmend(d, args, scope = "") {
 		briefing: [
 			`【已修订】主线第 ${s.ord} 步（**编号未变、身份未变、历史保留**${s.status === "done" ? "；注意这步已完成，改的是记录" : ""}）`,
 			...changes.map((c) => `- ${c}`),
-			`理由已记录：${reason}`
+			reasonLine(reason)
 		].join("\n")
 	};
 }
@@ -1794,7 +1814,7 @@ function planInsert(d, args, scope = "") {
 			...parsed.map((s, i) => `- 第 ${afterOrd + 1 + i} 步：${s.acceptance ? `${s.text}（验收：${s.acceptance}）` : s.text}`),
 			moved.length ? `⚠ 编号已顺延：${moved.join("，")}（**步骤身份与完成状态跟着 id 走，没有被带跑**）` : "",
 			focusMsg,
-			`理由已记录：${reason}`,
+			reasonLine(reason),
 			"",
 			anchorText(d, plan, { verdict: "计划已修订，继续按新编号走" })
 		].filter(Boolean).join("\n")
@@ -1846,7 +1866,7 @@ function planDrop(d, args, scope = "") {
 			`【已丢弃】原主线第 ${s.ord} 步「${s.text}」`,
 			focusMsg,
 			moved.length ? `⚠ 编号已收拢：${moved.join("，")}（步骤身份与完成状态跟着 id 走）` : "",
-			`理由已记录：${reason}`,
+			reasonLine(reason),
 			"（行没有被删除，历史可查；台账里也留了这一笔。）"
 		].filter(Boolean).join("\n")
 	};
@@ -1903,7 +1923,7 @@ function planRework(d, args, scope = "") {
 		briefing: [
 			`【已开返工】记为**额外步骤 ${dNo}**：${text}`,
 			`它取代的是主线第 ${target.ord} 步「${target.text}」${target.status === "done" ? "（该步之前标为已完成 —— 已完成区不删除、不篡改，只是**被取代**）" : ""}`,
-			`理由已记录：${reason}`,
+			reasonLine(reason),
 			cur && cur.kind === "plan" && cur.id !== target.id ? `主线第 ${cur.ord} 步「${cur.text}」已挂起 —— 返工做完 plan_step_done 会**自动回到它**。` : "",
 			down.length ? `⚠ 下游有 ${down.length} 步建立在它之上（第 ${down.map((s) => s.ord).join("、")} 步）—— 返工完成后**该复查下游**；拿不准要不要重做，用 ask_user_question 问用户。` : "",
 			"（返工不计入偏离额度：这是纠错，不是跑偏。）"
@@ -2219,7 +2239,7 @@ function planDetour(d, args, scope = "", session = "") {
 		detour_no: dNo,
 		briefing: [
 			`【已开一条额外步骤 ${dNo}】${text}`,
-			reason ? `理由已记录：${reason}` : "",
+			reason ? reasonLine(reason) : "",
 			cur && cur.kind === "plan" ? `主线第 ${cur.ord} 步「${cur.text}」已挂起 —— 做完这条 plan_step_done 会**自动回到它**。` : "",
 			"（额外步骤**不计偏离额度**：它是「要做的活」，不是「跑偏」。主线仍然是主线，它只是岔出去的一条。）"
 		].filter(Boolean).join("\n")
@@ -2246,7 +2266,7 @@ function planDetour(d, args, scope = "", session = "") {
  */
 function planWait(d, args, scope = "", session = "") {
 	const plan = activePlan(d, scope);
-	if (!plan) return { ok: false, reason: "当前项目没有生效计划。" };
+	if (!plan) return noPlanError();
 	const what = (args.what || "").trim();
 	const until = (args.until || "").trim();
 	const onTimeout = (args.on_timeout || "").trim();
@@ -2313,7 +2333,7 @@ function planMute(d, args, scope = "") {
 		mute_cap: muteCap,
 		briefing: [
 			`已静音：接下来 ${n} 次工具调用内不主动提醒（硬上限 ${muteCap}）。`,
-			`理由已记录：${reason}`,
+			reasonLine(reason),
 			"到期后会**温和问你一句**（刚才完成了什么、还在不在计划上）—— 静音是暂停打扰，不是免责。"
 		].join("\n")
 	};
