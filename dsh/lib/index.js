@@ -131,6 +131,9 @@ function open(config) {
 			const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
 			if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
 		};
+		// 【owner】这条计划归哪个会话。政企场景的硬要求：多会话同时干活时**不许互相踩**。
+		// 旧库默认空串 = 旧行为（按 scope 取最新一条）。
+		addCol("plans", "owner", "owner TEXT NOT NULL DEFAULT ''");
 		addCol("steps", "detour_no", "detour_no INTEGER NOT NULL DEFAULT 0");
 		// 操作级 cue：这一步"怎么做才算做完"（Rubinstein 2001：切换代价随 task cuing 下降）
 		addCol("steps", "acceptance", "acceptance TEXT NOT NULL DEFAULT ''");
@@ -241,8 +244,33 @@ function sessionKeyOf(agent) {
  * 不再依赖一行全局指针，而是直接按 (status, scope) 查——指针是派生的，
  * 查出来的一定自洽：项目 A 与项目 B 各有各的 active 计划，互不覆盖。
  */
-function activePlan(d, scope = "") {
+/**
+ * 【按会话认领】取出"当前生效的计划"。
+ *
+ * 为什么加 owner（政企场景的硬要求）：
+ *   原来是 `WHERE status='active' AND scope=? ORDER BY id DESC LIMIT 1` —— 一个目录只认一条。
+ *   后果：**两个会话在同一目录各自立计划，后立的会把先立的静默作废**。
+ *   先那个会话还在跑，却再也查不到 active 计划 → **锚不再注入 → 护栏静默失明**
+ *   （没报错、没提醒）。按本项目的原则，这是最坏的一类失败。
+ *
+ * 现在：**先找本会话认领的那条**；本会话没有就是没有（**不借用别人的**）——
+ * 这样两个会话各干各的，谁也踩不到谁。
+ *
+ * @param owner 会话标识；不传时退回旧行为（只按 scope 取最新一条），保证向后兼容。
+ */
+function activePlan(d, scope = "", owner = "") {
+	if (owner) {
+		const mine = d.prepare("SELECT * FROM plans WHERE status='active' AND scope=? AND owner=? ORDER BY id DESC LIMIT 1").get(scope, owner);
+		if (mine) return mine;
+		// 本会话没有计划 → 不回退到别人的（那正是互踩的来源）
+		return null;
+	}
 	return d.prepare("SELECT * FROM plans WHERE status = 'active' AND scope = ? ORDER BY id DESC LIMIT 1").get(scope) || null;
+}
+
+/** 本目录下**别人的**活跃计划（用于"还有 N 条别的计划"的提示）。 */
+function otherActivePlans(d, scope, owner) {
+	return d.prepare("SELECT * FROM plans WHERE status='active' AND scope=? AND owner!=? ORDER BY id DESC").all(scope, owner || "");
 }
 function stepById(d, id) {
 	return d.prepare("SELECT * FROM steps WHERE id = ?").get(Number(id)) || null;
@@ -831,7 +859,7 @@ function driftSignals(d, plan, threshold) {
 // ---------- 工具实现 ----------
 
 /** 1. plan_set：立计划 / 显式重规划（重规划必须带 reason，不许可静默改） */
-function planSet(d, args, scope = "") {
+function planSet(d, args, scope = "", session = "") {
 	const title = (args.title || "").trim();
 	if (!title) return { ok: false, reason: "title 不能为空" };
 	const raw = Array.isArray(args.steps) ? args.steps : [];
@@ -839,7 +867,37 @@ function planSet(d, args, scope = "") {
 	const parsed = parseStepList(raw);
 	if (parsed.length === 0) return { ok: false, reason: "steps 不能为空：至少要写下第 1 步是什么" };
 
+	// 【不许静默作废】原来这里直接 prev 标 superseded —— 于是"两个会话在同一目录各自立计划，
+	// 后立的把先立的静默作废，先那个会话的护栏就静默失明了"（没报错、没提醒）。
+	// 政企场景下这是最坏的一类失败。所以：
+	//   · 别人的计划 → 不许动（拒绝，并说明）
+	//   · 自己的计划 → 要取代必须**显式**（带 replace: true）
 	const prev = activePlan(d, scope);
+	if (prev && prev.owner && session && prev.owner !== session) {
+		return {
+			ok: false,
+			reason: [
+				"⛔ **这个目录已经有一条别的会话的活跃计划 —— 不许静默作废它。**",
+				`   它叫『${prev.title}』（v${prev.version}，${new Date(Number(prev.created_at)).toLocaleString("zh-CN")} 立的）`,
+				"",
+				"  那条计划**可能正在被另一个会话跑着**。你把它作废了，对方的护栏会**静默失明**",
+				"  （查不到活跃计划 → 锚不再注入 → 没报错、也没提醒）。",
+				"",
+				"怎么办（三选一）：",
+				"  · 你只是要**另起一条并行的线** → 给它一个不同的 scope（换个工作目录），或等本功能做完",
+				"  · 那条计划**确实已经结束了** → 让**它那个会话**自己收尾，或你确认后带 `replace: true` 显式取代",
+				"  · 你要的就是**取代它** → `replace: true` + reason 写清为什么"
+			].join("\n")
+		};
+	}
+	// 【自己的计划：不拦，但必须**说出来】** —— "不许静默"的正解是「不许不说」，不是「不许做」。
+	// 重规划是高频且正当的动作，硬拦会让它变啰嗦；但旧的计划被取代、它有几步已完成，
+	// 这件事必须显著写在回执里，不能只当成一句附带说明。
+	const replacedNote = (prev && !args.replace)
+		? ["", `⚠ **你刚取代了『${prev.title}』（v${prev.version}）** —— 它的内容还在（可在台账里查），`,
+		   `   但**它的进度不再算数**。如果只是要改它，「改一步/插一步/丢一步」比整个换掉更合适。`]
+		: [];
+
 	let version = 1;
 	const reason = (args.reason || "").trim();
 	if (prev) {
@@ -860,8 +918,8 @@ function planSet(d, args, scope = "") {
 	}
 	// 谱系：重规划继承旧计划的谱系；首次立计划时谱系 = 自己
 	const lineageId = prev ? Number(prev.lineage_id) : 0;
-	const res = d.prepare("INSERT INTO plans (title, version, status, reason, scope, lineage_id, created_at) VALUES (?,?,'active',?,?,?,?)")
-		.run(title, version, reason, scope, lineageId, now());
+	const res = d.prepare("INSERT INTO plans (title, version, status, reason, scope, lineage_id, created_at, owner) VALUES (?,?,'active',?,?,?,?,?)")
+		.run(title, version, reason, scope, lineageId, now(), session);
 	const planId = Number(res.lastInsertRowid);
 	if (!lineageId) d.prepare("UPDATE plans SET lineage_id = ? WHERE id = ?").run(planId, planId);
 	// I5 延伸：**重规划不许把旧计划的欠账弄丢**。泊位是按 plan_id 归属的，
@@ -2757,7 +2815,7 @@ function apply(ctx, config) {
 				reason: { type: "string", description: "覆盖已有计划时的理由（首次立计划可省略）" },
 				carry: { type: "array", items: { type: "json" }, description: "换计划时的显式映射：[{from_step_id, to_index, relation, note}]，relation ∈ kept（保留并继承完成状态）| replaced（取代=返工，旧的做错了）| split（拆分）| merged（合并）。不写映射而旧步已完成 → 回执会把它吼出来" }
 			},
-			exec: (a, x) => withRefs(d, a, scopeOf(x), planSet)
+			exec: (a, x) => withRefs(d, a, scopeOf(x), (dd, aa, sc) => planSet(dd, aa, sc, sessionKeyOf(x && x.agent)))
 		},
 		{
 			name: "plan_status",
