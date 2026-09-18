@@ -1174,7 +1174,7 @@ function urgentGate(d, args, plan, cur) {
 				+ "可陈述的代价例如：数据会丢 / 有安全风险（如 token 泄露）/ 会堵住别人的工作。"
 		};
 	}
-	if (!args.user_approved) {
+	if (!args.user_said) {
 		const ask = "「我发现一个紧急问题：" + text + "。拖延的代价是：" + reason + "。"
 			+ "它会打断当前第 " + (cur ? cur.ord : "-") + " 步（" + (cur ? cur.text : "无") + "）。"
 			+ "要现在停下主线去修它吗？」";
@@ -1189,8 +1189,13 @@ function urgentGate(d, args, plan, cur) {
 				"**先问用户**，把这个问句照抄给他（不要改意思）：",
 				"   " + ask,
 				"",
-				"用户同意后，带 user_approved: true 再调一次，才会生效（并记进台账：谁批准的）。",
-				"（为什么这么设计：紧急是最容易被滥用的借口 —— 谁能宣布紧急，谁就能随时插队。",
+				"用户同意后，**把用户的原话抄进 user_said** 再调一次，例如：user_said: \"对，先修这个\"",
+				"",
+				"**为什么是抄原话、而不是填一个 true：**",
+				"   · 填 true 是**自报** —— 代码拦不住 agent 撒谎（它完全可以没问就填 true）；",
+				"   · 抄原话是**摆证据** —— 编造一句用户没说过的话，成本高得多，",
+				"     而且**那句话会显示给用户看**，他一眼就知道是不是自己说的。",
+				"（设计理由：紧急是最容易被滥用的借口 —— 谁能宣布紧急，谁就能随时插队。",
 				"  受益者不该同时是裁判。）"
 			].filter(Boolean).join("\n")
 		};
@@ -1207,6 +1212,10 @@ function planDiscover(d, args, scope = "") {
 	if (args.severity === "urgent") {
 		const _g = urgentGate(d, args, plan, currentStep(d, plan.id));
 		if (_g) return _g;
+		// 【摆证据】批准的**原话**进台账，并计数 —— 一回合批 5 次，用户一眼看出不对
+		const _cnt = Number(stGet(d, plan.id, "urgent_approved_n", "0")) + 1;
+		stSet(d, plan.id, "urgent_approved_n", String(_cnt));
+		log(d, "urgent_approved", { planId: plan.id, ref: "紧急批准", detail: "第 " + _cnt + " 次｜用户原话：「" + args.user_said + "」｜拖延代价：" + args.reason });
 	}
 	const text = (args.text || "").trim();
 	if (!text) return { ok: false, reason: "text 不能为空：一句话写清这个新发现的问题" };
@@ -2691,7 +2700,7 @@ function apply(ctx, config) {
 				text: { type: "string", required: true, description: "一句话写清这个新发现的问题" },
 				severity: { type: "string", description: "普通就不填。填 urgent = 「要求打断计划」：必须同时给 reason（拖延的代价），且必须经用户批准（先不带 user_approved 调一次拿到问句；同意后再带 user_approved: true 调）" },
 				reason: { type: "string", description: "severity=urgent 时必填：拖延的代价是什么（数据会丢 / 安全风险 / 堵住别人）。紧急 ≠ 我想做" },
-				user_approved: { type: "boolean", description: "severity=urgent 时必填：用户是否已同意打断计划" },
+				user_said: { type: "string", description: "severity=urgent 时必填：**用户同意打断的原话**（照抄，不要改写、不要自己编）。填这个而不是 true —— 自报可以撒谎，抄原话是摆证据，而且会显示给用户看" },
 				disposition: { type: "string", description: "必填。permit | defer | decline；没想清楚就选 defer（入泊不会丢）" },
 				resume_when: { type: "string", description: "选 defer 时必填：到时候凭什么判断该回来看它了（如「第 4 步做完之后」）" },
 				resume_after_ord: { type: "number", description: "选 defer 时可选：主线第几步做完后回来（内部会换算成步骤身份；序号顺延也不会指错）" },

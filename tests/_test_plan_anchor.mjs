@@ -1200,6 +1200,7 @@ check('（紧急）不给理由被拒，且点明"没有理由的紧急=我想�
 // ② 给理由但未经用户批准 → 拒，且给出照抄问句
 r = await callIn('plan_discover', { text: '发现 token 泄露', disposition: 'permit', severity: 'urgent', reason: '泄露的密钥若被扫到会直接造成损失' }, execAS);
 check('（紧急）未经用户批准被拒', r.refused, r.text.slice(0, 120));
+check('（紧急·摆证据）要求抄用户原话而不是填 true', r.text.includes('user_said') && r.text.includes('自报可以撒谎') === false && r.text.includes('用户的原话'), r.text.slice(0, 600));
 check('（紧急）明说判定权不在 agent 手上', r.text.includes('判定权不在你手上'), r.text.slice(0, 260));
 check('（紧急）给出可以直接照抄给用户的问句', r.text.includes('我发现一个紧急问题') && r.text.includes('要现在停下主线去修它吗'), r.text.slice(0, 520));
 check('（紧急）说明受益者不该同时是裁判', r.text.includes('受益者不该同时是裁判'), r.text.slice(0, 700));
@@ -1207,11 +1208,14 @@ check('（紧急）说明受益者不该同时是裁判', r.text.includes('受�
 r = await callIn('plan_status', {}, execAS);
 check('（紧急）未经批准时计划状态没被动过', !r.text.includes('泊位 1 条'), r.text.slice(0, 200));
 // ④ 用户批准后才生效
-r = await callIn('plan_discover', { text: '发现 token 泄露', disposition: 'permit', severity: 'urgent', reason: '泄露的密钥若被扫到会直接造成损失', user_approved: true }, execAS);
-check('（紧急）用户批准后生效', !r.refused, r.text.slice(0, 200));
+r = await callIn('plan_discover', { text: '发现 token 泄露', disposition: 'permit', severity: 'urgent', reason: '泄露的密钥若被扫到会直接造成损失', user_said: '对，先修这个' }, execAS);
+check('（紧急）抄了用户原话后生效', !r.refused, r.text.slice(0, 200));
 // ⑤ 普通发现不受影响
 r = await callIn('plan_discover', { text: '顺手看到日志格式不统一', disposition: 'defer', resume_when: '计划走完之后' }, execAS);
 check('（对照）普通发现照常入泊，不受紧急闸门影响', !r.refused, r.text.slice(0, 200));
+r = await callIn('plan_log', {}, execAS);
+check('（摆证据）批准的**用户原话**进了台账，可核对', r.text.includes('对，先修这个'), r.text.slice(0, 400));
+check('（摆证据）台账里标明了这是第几次紧急批准', r.text.includes('第 1 次'), r.text.slice(0, 400));
 
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
