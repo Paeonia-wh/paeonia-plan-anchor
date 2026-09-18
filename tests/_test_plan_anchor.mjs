@@ -1077,5 +1077,21 @@ await sayCheck('先不说这个，你先把图给我', false, '（先不说）�
 await sayCheck('你先别急着改', true, '（对照）真正的「先别急」仍然叫停');
 await sayCheck('先别做那个，我们换个方向', true, '（对照）真正的「先别做」仍然叫停');
 
+console.log(`\n--- 57. 【问过就不再问】plan_note 答复过的停滞质问不再重复 ---`);
+const execAM = mkExec('D:\\projAM');
+await callIn('plan_set', { title: 'AM 计划', steps: ['AM1', 'AM2'] }, execAM);
+const anchorAM = async () => { await userSays(execAM, '继续'); const inj = await fireIn('read', { file_path: 'am.js' }, execAM); return noticeText(inj); };
+await anchorAM(); await anchorAM();
+const q3 = await anchorAM();
+check('（前置）连续 3 回合没变 → 出现质问', q3.includes('回合没有任何变化'), q3.slice(0, 120));
+await callIn('plan_note', { text: '我在做别的事，这一步在等外部依赖' }, execAM);
+const q4 = await anchorAM();
+check('（修复）答复之后不再重复同一句质问', !q4.includes('回合没有任何变化'), q4.slice(0, 120));
+check('（修复）此时干脆保持安静（不再注入锚）', q4 === '' || !q4.includes('【计划锚】'), q4.slice(0, 120));
+await fireIn('write', { file_path: 'am.txt', content: 'x' }, execAM);
+await callIn('plan_step_done', { evidence: 'AM1 完成' }, execAM);
+const q5 = await anchorAM();
+check('（对照）状态一变，锚立刻重新开口（给完整版）', q5.includes('【计划锚】') && !q5.includes('没有任何变化'), q5.slice(0, 160));
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

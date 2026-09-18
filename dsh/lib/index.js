@@ -1804,6 +1804,10 @@ function planNote(d, args, scope = "", session = "") {
 	const before = budget(d, plan.id);
 	setBudget(d, plan.id, 0);
 	stSet(d, plan.id, "on_track_note", text);
+	// 【修·问过就不再问】把当前指纹记为「已答复」—— 锚下次看到同一个指纹时不再重复质问。
+	// 不这样做的后果实测过：我用 plan_note 答了它，下一回合它还是一模一样的质问句，
+	// 于是"质问"自己也变成了墙纸。
+	stSet(d, plan.id, "anchor_ack_sig", anchorSignature(d, plan));
 	log(d, "on_track", { planId: plan.id, stepId: cur ? cur.id : 0, ref: `清零 ${Math.round(before * 10) / 10}`, detail: text, session });
 	return {
 		ok: true,
@@ -2052,7 +2056,9 @@ function turnAnchorNotice(d, scope = "") {
 	stSet(d, plan.id, "anchor_sig_n", String(n));
 
 	if (n >= ANCHOR_STALE_AT) {
-		// 连续没变化 → 不再复读，改成质问（这条会每回合都在，直到状态真的变化）
+		// 【问过就不再问】如果这个指纹已经被答复过（plan_note 声明在轨），就别再问第二遍 ——
+		// 否则"质问"会和"复读"一样退化成墙纸。等状态真的变了（指纹变）自然会重新开口。
+		if (stGet(d, plan.id, "anchor_ack_sig", "") === sig) return null;
 		return notice([
 			`⚠【计划锚】**计划已经 ${n} 回合没有任何变化** —— 还停在这里：`,
 			cur ? `   第 ${cur.ord} 步「${cur.text}」（主线 ${doneN}/${steps.length}）` : `   主线无进行中步骤（${doneN}/${steps.length}）`,
