@@ -1808,6 +1808,7 @@ function planNote(d, args, scope = "", session = "") {
 	// 不这样做的后果实测过：我用 plan_note 答了它，下一回合它还是一模一样的质问句，
 	// 于是"质问"自己也变成了墙纸。
 	stSet(d, plan.id, "anchor_ack_sig", anchorSignature(d, plan));
+	stSet(d, plan.id, "anchor_ack_age", "0");
 	log(d, "on_track", { planId: plan.id, stepId: cur ? cur.id : 0, ref: `清零 ${Math.round(before * 10) / 10}`, detail: text, session });
 	return {
 		ok: true,
@@ -2037,6 +2038,15 @@ function anchorSignature(d, plan) {
  */
 const ANCHOR_STALE_AT = 3;
 
+/**
+ * 「已声明在轨」的**时效**（回合数）。
+ * 为什么必须有：用户一眼看出的漏洞 —— 我声明在轨 → 锚安静 → 然后连续几十轮都在做别的事，
+ * 而计划状态一个字没动、指纹也没变 → **锚会一直安静下去，我就这么漂走了**。
+ * 那正是这工具存在的理由。所以豁免必须是**有时效的**，到期重新问，而且要问得更重。
+ * （同一套思路 plan_mute 早就有了：静音有上限、到期温和 check-in。这里当时没复用，是失误。）
+ */
+const ANCHOR_ACK_TTL = 5;
+
 /** 回合锚：每个用户回合的第一次工具调用后，把计划放回眼前。**内容会自适应：变了给全的，没变缩短，一直没变就质问。** */
 function turnAnchorNotice(d, scope = "") {
 	const plan = activePlan(d, scope);
@@ -2062,11 +2072,30 @@ function turnAnchorNotice(d, scope = "") {
 		// 该闭嘴的是催问（噪声），绝不能消失的是锚本身（那是这工具存在的理由）。
 		// 我第一版写成 return null（连锚都不注入），那是把"别唠叨"做成了"别出现"，是错的。
 		if (stGet(d, plan.id, "anchor_ack_sig", "") === sig) {
-			const tail = cur ? `｜第 ${cur.ord} 步` : "";
-			return notice(
-				`【计划锚】${plan.title}｜${doneN}/${steps.length} 步${tail}${park ? `｜泊位 ${park}` : ""}（已声明在轨，不再追问）`,
-				"plan anchor (acked)"
-			);
+			const age = Number(stGet(d, plan.id, "anchor_ack_age", "0")) + 1;
+			stSet(d, plan.id, "anchor_ack_age", String(age));
+			if (age <= ANCHOR_ACK_TTL) {
+				// 豁免期内：**锚仍在**（闭嘴≠消失），只是不追问，并如实标出还剩几回合
+				const tail = cur ? `｜第 ${cur.ord} 步` : "";
+				return notice(
+					`【计划锚】${plan.title}｜${doneN}/${steps.length} 步${tail}${park ? `｜泊位 ${park}` : ""}（已声明在轨 · 豁免第 ${age}/${ANCHOR_ACK_TTL} 回合）`,
+					"plan anchor (acked)"
+				);
+			}
+			// 【豁免到期】重新问，而且问得更重 —— 因为"声明在轨这么久、计划却一步没动"本身就可疑
+			stDel(d, plan.id, "anchor_ack_sig");
+			stDel(d, plan.id, "anchor_ack_age");
+			return notice([
+				`⚠【计划锚】**你声明「在轨」已经 ${age} 回合了，但计划一步没动。**`,
+				cur ? `   还停在第 ${cur.ord} 步「${cur.text}」（主线 ${doneN}/${steps.length}）` : `   主线无进行中步骤（${doneN}/${steps.length}）`,
+				"",
+				"三种可能，选一个说清楚：",
+				"  · **这一步其实不该这么做** → `plan_amend` 改它 / `plan_drop` 丢掉 / `plan_set` 换计划",
+				"  · **确实还在做它** → 再 `plan_note` 一次（但顺带想想：为什么这么久没进展？）",
+				"  · **你在做别的事** → 把它记成计划的一部分（`plan_insert`），别让它悬着",
+				"",
+				"（豁免是有的，但**不会永久** —— 否则你漂走了也没人提醒你。）"
+			].join("\n"), "plan anchor (ack expired)");
 		}
 		return notice([
 			`⚠【计划锚】**计划已经 ${n} 回合没有任何变化** —— 还停在这里：`,

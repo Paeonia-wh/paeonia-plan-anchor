@@ -1093,5 +1093,21 @@ await callIn('plan_step_done', { evidence: 'AM1 完成' }, execAM);
 const q5 = await anchorAM();
 check('（对照）状态一变，锚立刻重新开口（给完整版）', q5.includes('【计划锚】') && !q5.includes('没有任何变化'), q5.slice(0, 160));
 
+console.log(`\n--- 58. 【豁免有时效】声明在轨不会变成"永久失明"（用户指出的漏洞） ---`);
+const execAN = mkExec('D:\\projAN');
+await callIn('plan_set', { title: 'AN 计划', steps: ['AN1', 'AN2'] }, execAN);
+const anc = async () => { await userSays(execAN, '继续'); const inj = await fireIn('read', { file_path: 'an.js' }, execAN); return noticeText(inj); };
+await anc(); await anc(); await anc();          // 走到质问态
+await callIn('plan_note', { text: '我在做别的事' }, execAN);
+const c1 = await anc();
+check('（豁免期）锚仍在，且标明豁免进度', c1.includes('【计划锚】') && c1.includes('豁免第 1/5 回合'), c1.slice(0, 170));
+let last = c1;
+for (let i = 0; i < 4; i++) last = await anc();
+check('（豁免期）第 5 回合仍在豁免内', last.includes('豁免第 5/5 回合'), last.slice(0, 170));
+const expired = await anc();
+check('（关键）豁免到期 → 重新问，不会永久失明', expired.includes('声明「在轨」已经') && expired.includes('一步没动'), expired.slice(0, 220));
+check('（关键）升级质问给出三种出路', expired.includes('plan_amend') && expired.includes('plan_insert') && expired.includes('plan_note'), expired.slice(0, 320));
+check('（关键）并明说豁免不会永久', expired.includes('不会永久'), expired.slice(0, 360));
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
