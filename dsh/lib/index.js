@@ -1167,6 +1167,21 @@ function planStatus(d, args, scope = "") {
 					: [];
 			})(),
 			...(integrityLine(d) ? [integrityLine(d)] : []),
+			// 【第 34 步的验收】把"漂移提醒 / 关卡拒绝 / 在轨声明"的统计摆出来 ——
+			// 让"这个提醒是不是误报"能被算，而不是靠回忆。
+			...(() => {
+				const q = (k) => d.prepare("SELECT COUNT(*) c FROM ledger WHERE plan_id=? AND kind=?").get(plan.id, k).c;
+				const warn = q("drift_warning");
+				if (!warn) return [];
+				const ontrack = q("on_track");
+				const refused = q("refused");
+				const done = q("step_done");
+				// 粗估：在轨声明的次数 ≥ 提醒次数的一半时，说明大部分提醒其实是"合法长活"被误判
+				const hint = ontrack >= warn * 0.5
+					? "（在轨声明次数与提醒次数接近 → 有相当比例是「合法长活被误判」）"
+					: "（在轨声明远少于提醒 → 多数提醒可能戳中了真的停摆）";
+				return [`📊 提醒统计：漂移提醒 ${warn} 次 · 在轨声明 ${ontrack} 次 · 关卡拒绝 ${refused} 次 · 完成 ${done} 步 ${hint}`];
+			})(),
 			...(reviewSince ? ["", "▶ 完成闸门开着：先用 `ask_user_question` 问用户「这个计划真的交付了吗？」，再用 `plan_review` 记录答复。"] : []),
 			...(muteLeft(d, plan.id) > 0 ? [`⏸ 主动提醒已静音，还剩 ${muteLeft(d, plan.id)} 次调用（静音不是免责，台账照记）`] : []),
 			...(sig.length ? ["", "漂移信号：" + sig.join("；")] : [])

@@ -1293,5 +1293,22 @@ check('（并行）A 的计划完好无损（没被静默作废）', aStill.text
 r = await callIn('plan_set', { title: '明着取代它', steps: ['Z1'], reason: '确认取代', replace: true }, execAZ);
 check('（并行）带 replace:true 仍可显式取代', !r.refused, r.text.slice(0, 200));
 
+console.log(`\n--- 67. 【第 34 步验收】plan_status 能读到提醒统计（据此判断误报率）---`);
+const execBA = mkExec('D:\\projBA');
+await callIn('plan_set', { title: '统计计划', steps: ['B1 一步'] }, execBA);
+r = await callIn('plan_status', {}, execBA);
+check('（统计）没有提醒时不显示统计行（不啰嗦）', !r.text.includes('提醒统计'), r.text.slice(0, 200));
+// 连做 13 次**写**调用 → 触发"轻提醒"（阈值 12；只读工具只算 0.5，13 次读才 6.5，不够）
+for (let i = 0; i < 13; i++) await fireIn('write', { file_path: `ba${i}.txt`, content: 'x' }, execBA);
+r = await callIn('plan_status', {}, execBA);
+check('（统计）触发漂移提醒后，统计行出现', r.text.includes('提醒统计'), r.text.slice(-400));
+check('（统计）列出漂移提醒 / 在轨声明 / 关卡拒绝 三项', r.text.includes('漂移提醒') && r.text.includes('在轨声明') && r.text.includes('关卡拒绝'), r.text.slice(-400));
+check('（统计）给出可判断误报的提示', r.text.includes('合法长活') || r.text.includes('真的停摆'), r.text.slice(-400));
+// 在轨声明后，统计里的"在轨声明"计数要涨
+await callIn('plan_note', { text: '我在做这一步的长活' }, execBA);
+r = await callIn('plan_status', {}, execBA);
+const m = r.text.match(/在轨声明 (\d+) 次/);
+check('（统计）在轨声明计数会涨（可据此算误报率）', m && Number(m[1]) >= 1, r.text.slice(-400));
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
