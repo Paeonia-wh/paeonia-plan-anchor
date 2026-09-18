@@ -2145,8 +2145,9 @@ function turnAnchorNotice(d, scope = "") {
 			`⚠【计划锚】**计划已经 ${n} 回合没有任何变化** —— 还停在这里：`,
 			cur ? `   第 ${cur.ord} 步「${cur.text}」（主线 ${doneN}/${steps.length}）` : `   主线无进行中步骤（${doneN}/${steps.length}）`,
 			park ? `   另有 ${park} 条欠账挂着。` : "",
-			"这是**真的在推进**，还是**卡住了**？三选一：",
-			"  · 在推进 → `plan_note` 说一句进展（预算清零）",
+			"这是**真的在推进**，还是**卡住了**？四选一：",
+			"  · 在推进**这一步** → `plan_note` 说一句进展（预算清零）",
+			"  · **在做用户另外要的事**（不是这一步）→ `plan_detour` 把它开成一条额外步骤：主线挂起、做完自动回来、**不计偏离**。别让它只活在对话里。",
 			"  · 卡住了 → `plan_discover` 处置，或 `plan_amend` 改这一步",
 			"  · 不想做了 → `plan_drop` 丢掉它 / `plan_set` 换计划"
 		].filter(Boolean).join("\n"), "plan anchor (stalled)");
