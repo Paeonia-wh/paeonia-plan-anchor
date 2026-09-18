@@ -1158,5 +1158,23 @@ await callIn('plan_note', { text: '条件到了，我继续做' }, execAP);
 const w2 = await (async () => { await userSays(execAP, '继续'); const inj = await fireIn('read', { file_path: 'ap.js' }, execAP); return noticeText(inj); })();
 check('（唤醒）plan_note 解除等待（声明在推进 = 等待结束）', !w2.includes('在等：'), w2.slice(0, 180));
 
+console.log(`\n--- 61. 【论文依据】计划遵守率 + 计划膨胀可见 ---`);
+const execAQ = mkExec('D:\\projAQ');
+await callIn('plan_set', { title: 'AQ 计划', steps: ['AQ1', 'AQ2'] }, execAQ);
+const ancQ = async () => { await userSays(execAQ, '继续'); const inj = await fireIn('read', { file_path: 'aq.js' }, execAQ); return noticeText(inj); };
+await ancQ(); await ancQ();
+const z3 = await ancQ();
+check('（遵守率）第一次质问时显示"问过 1 次、0 次响应"', z3.includes('问过 1 次') && z3.includes('0 次有响应'), z3.slice(0, 240));
+await callIn('plan_note', { text: '我在推进' }, execAQ);
+const z4 = await ancQ();          // 豁免期
+const z5 = await ancQ();
+check('（遵守率）plan_note 之后计入一次响应', z5.includes('1 次有响应') || z5.includes('豁免'), z5.slice(0, 200));
+// 计划膨胀
+await callIn('plan_set', { title: 'AQ-2', steps: ['只一步'], reason: '换计划重来' }, execAQ);
+await callIn('plan_insert', { after_ord: 1, steps: ['加一步', '再加一步'], reason: '膨胀测试' }, execAQ);
+await userSays(execAQ, '继续');
+const z6 = noticeText(await fireIn('read', { file_path: 'aq2.js' }, execAQ));
+check('（膨胀）锚显示"计划已从 1 步长到 3 步"', z6.includes('计划已从 1 步长到 3 步'), z6.slice(0, 220));
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

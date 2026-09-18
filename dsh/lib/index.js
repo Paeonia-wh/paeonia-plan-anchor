@@ -871,6 +871,9 @@ function planSet(d, args, scope = "") {
 	const start = planSteps(d, planId).find((s) => s.status !== "done") || null;
 	if (start) d.prepare("UPDATE steps SET status='active', started_at=? WHERE id=?").run(now(), start.id);
 	setCurrent(d, planId, start ? start.id : null);
+	// 【计划膨胀】记下"出生时几步"—— 论文实测：早期插入额外阶段可能反而降低表现，
+	// 所以"这个计划长了多少"应该是个看得见的数字，而不是感觉。
+	stSet(d, planId, "birth_steps", String(parsed.length));
 	stDel(d, planId, "resume_step");
 	setBudget(d, planId, 0);
 	stSet(d, planId, "detour_used", 0);
@@ -903,6 +906,10 @@ function planSet(d, args, scope = "") {
 				...orphaned.filter((s) => !mappedFrom.has(s.id)).map((s) => `   ${s.done ? "✔" : "·"} 原第${s.ord}步 ${s.text}`),
 				"   → 如果你其实只是想**局部调整**（改一步、插一步、删一步），那 plan_set 是错的工具：",
 				"     应该用 `plan_amend`（原地改，编号与历史不变）/ `plan_insert`（插一步，编号顺延）/ `plan_drop`（丢一步）。这三个都不会丢进度。"
+			] : []),
+			...(parsed.filter((s) => !s.acceptance).length ? [
+				`⚠ 有 ${parsed.filter((s) => !s.acceptance).length} 步**没写验收标准**（"怎么算做完"）。`,
+				"   论文实测（arXiv 2604.12147）：**烂计划比没计划更糟**。写了验收，你自己和用户都能判它过没过。"
 			] : []),
 			"执行中冒出任何新问题 → 先 plan_discover 显式判定：permit / defer / decline。",
 			"选 defer 必须一起给 resume_when（回程票）；能给出步骤号就带 resume_after_ord，到期我会主动提醒。",
@@ -1047,6 +1054,7 @@ function planStepDone(d, args, scope = "", session = "") {
 	d.prepare("UPDATE steps SET status='done', evidence=?, done_at=? WHERE id=?").run(evidence, now(), cur.id);
 	// 熔断放行必须留在**主视图**上，不能只躺在台账里（红队抓到：以前只看得到"完成了"）
 	if (released) d.prepare("UPDATE steps SET forced=1 WHERE id=?").run(cur.id);
+	markAnswered(d, plan.id);   // 【计划遵守率】这是一次实质响应
 	log(d, cur.kind === "detour" ? "detour_done" : "step_done", { planId: plan.id, stepId: cur.id, detail: evidence });
 	setBudget(d, plan.id, 0);
 
@@ -1795,6 +1803,31 @@ function planRework(d, args, scope = "") {
  * 它是"我在轨"的**唯一表达通道**：清零预算 + 进台账。
  * 台账记的是「自称在轨」，与「真的完成」严格区分 —— 可见化，而不是禁止。
  */
+/**
+ * 【计划遵守率】质问发出后，是否得到了"实质性响应"。
+ * 依据：arXiv 2604.12147《From Plan to Action》—— 它把 plan compliance 量化测量了
+ *（21,120 条轨迹）。我们没有这个数字时，"锚有没有被无视"只能靠感觉；
+ * 有了它，那就是一个可查的指标，而不是印象。
+ *
+ * 判据：质问发出 → ask_open=1；之后**任何实质性动作**（在轨声明 / 步进 / 改计划 /
+ * 开额外步骤 / 进入等待）→ 认领这一次质问，ask_answered++。
+ */
+function markAnswered(d, planId) {
+	if (!planId) return;
+	if (stGet(d, planId, "ask_open", "") !== "1") return;
+	stDel(d, planId, "ask_open");
+	stSet(d, planId, "ask_answered", String(Number(stGet(d, planId, "ask_answered", "0")) + 1));
+}
+/** 遵守率的显示行（没问过就不显示）。 */
+function complianceLine(d, planId) {
+	const total = Number(stGet(d, planId, "ask_total", "0"));
+	if (!total) return "";
+	const ans = Number(stGet(d, planId, "ask_answered", "0"));
+	const open = stGet(d, planId, "ask_open", "") === "1";
+	const rate = total ? Math.round((ans / total) * 100) : 0;
+	return `📊 这条质问问过 ${total} 次，其中 ${ans} 次有响应（遵守率 ${rate}%）${open ? " —— **当前这一次还没回应**" : ""}`;
+}
+
 function planNote(d, args, scope = "", session = "") {
 	const plan = activePlan(d, scope);
 	if (!plan) return { ok: false, reason: "当前项目没有生效计划 —— 没有计划就没有预算可清。" };
@@ -1804,6 +1837,7 @@ function planNote(d, args, scope = "", session = "") {
 	const before = budget(d, plan.id);
 	setBudget(d, plan.id, 0);
 	stSet(d, plan.id, "on_track_note", text);
+	markAnswered(d, plan.id);   // 【计划遵守率】这是一次实质响应
 	// 声明"我在推进"就等于宣告**等待结束**（唤醒条件已满足）—— 所以顺手清掉等待状态
 	for (const k of ["waiting_what", "waiting_until", "waiting_timeout", "waiting_turns", "waiting_limit", "waiting_step"]) stDel(d, plan.id, k);
 	// 【修·问过就不再问】把当前指纹记为「已答复」—— 锚下次看到同一个指纹时不再重复质问。
@@ -2224,8 +2258,12 @@ function turnAnchorNotice(d, scope = "") {
 			// 【豁免到期】重新问，而且问得更重 —— 因为"声明在轨这么久、计划却一步没动"本身就可疑
 			stDel(d, plan.id, "anchor_ack_sig");
 			stDel(d, plan.id, "anchor_ack_age");
+			// 【计划遵守率】记一笔"质问发出"（可测量的事实，不是印象）
+			stSet(d, plan.id, "ask_total", String(Number(stGet(d, plan.id, "ask_total", "0")) + 1));
+			stSet(d, plan.id, "ask_open", "1");
 			return notice([
 				`⚠【计划锚】**你声明「在轨」已经 ${age} 回合了，但计划一步没动。**`,
+				complianceLine(d, plan.id),
 				cur ? `   还停在第 ${cur.ord} 步「${cur.text}」（主线 ${doneN}/${steps.length}）` : `   主线无进行中步骤（${doneN}/${steps.length}）`,
 				"",
 				"三种可能，选一个说清楚：",
@@ -2236,8 +2274,12 @@ function turnAnchorNotice(d, scope = "") {
 				"（豁免是有的，但**不会永久** —— 否则你漂走了也没人提醒你。）"
 			].join("\n"), "plan anchor (ack expired)");
 		}
+		// 【计划遵守率】同上
+		stSet(d, plan.id, "ask_total", String(Number(stGet(d, plan.id, "ask_total", "0")) + 1));
+		stSet(d, plan.id, "ask_open", "1");
 		return notice([
 			`⚠【计划锚】**计划已经 ${n} 回合没有任何变化** —— 还停在这里：`,
+			complianceLine(d, plan.id),
 			cur ? `   第 ${cur.ord} 步「${cur.text}」（主线 ${doneN}/${steps.length}）` : `   主线无进行中步骤（${doneN}/${steps.length}）`,
 			park ? `   另有 ${park} 条欠账挂着。` : "",
 			"这是**真的在推进**，还是**卡住了**？四选一：",
@@ -2265,6 +2307,10 @@ function turnAnchorNotice(d, scope = "") {
 	} else {
 		bits.push("主线无进行中步骤");
 	}
+	// 【计划膨胀】长了多少，明说 —— 论文（arXiv 2604.12147）实测：早期插入额外阶段
+	// 可能反而降低表现，尤其当它不符合模型内在的解题策略时。所以这该是个看得见的数字。
+	const birth = Number(stGet(d, plan.id, "birth_steps", "0"));
+	if (birth && steps.length > birth) bits.push(`📈 计划已从 ${birth} 步长到 ${steps.length} 步（后加 ${steps.length - birth}）`);
 	bits.push(park ? `泊位 ${park} 条未处理` : "泊位空");
 	return notice(bits.join("｜") + "\n新发现的问题请先 plan_discover 显式判定处置（permit/defer/decline），不要直接开工。", "plan anchor");
 }
