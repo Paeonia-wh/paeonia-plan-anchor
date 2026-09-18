@@ -1174,7 +1174,8 @@ await callIn('plan_set', { title: 'AQ-2', steps: ['只一步'], reason: '换计�
 await callIn('plan_insert', { after_ord: 1, steps: ['加一步', '再加一步'], reason: '膨胀测试' }, execAQ);
 await userSays(execAQ, '继续');
 const z6 = noticeText(await fireIn('read', { file_path: 'aq2.js' }, execAQ));
-check('（膨胀）锚显示"计划已从 1 步长到 3 步"', z6.includes('计划已从 1 步长到 3 步'), z6.slice(0, 220));
+check('（膨胀·论文公式）锚显示三维度量与膨胀率', z6.includes('计划演进') && z6.includes('膨胀') && z6.includes('保真') && z6.includes('覆盖'), z6.slice(0, 260));
+check('（膨胀·算得对）原 1 步全保留 + 后加 2 步 → 保真 33%、膨胀 67%', z6.includes('33%') && z6.includes('67%'), z6.slice(0, 300));
 
 console.log(`\n--- 62. 【说了没做】等待期间真的不涨预算 + 等待态/膨胀在 plan_status 里可见 ---`);
 const execAR = mkExec('D:\\projAR');
@@ -1188,7 +1189,7 @@ check('（缺口二）plan_status 里能看到等待状态', r.text.includes('�
 check('（缺口二）并列出唤醒条件与超时动作', r.text.includes('API 返回 200') && r.text.includes('改用缓存'), r.text.slice(0, 460));
 await callIn('plan_insert', { after_ord: 1, steps: ['AR1.5 后加的'], reason: '测试膨胀' }, execAR);
 r = await callIn('plan_status', {}, execAR);
-check('（缺口三）plan_status 里能看到计划膨胀', r.text.includes('计划已从 2 步长到 3 步'), r.text.slice(0, 500));
+check('（缺口三）plan_status 里能看到计划演进度量', r.text.includes('计划演进') && r.text.includes('膨胀'), r.text.slice(0, 600));
 
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

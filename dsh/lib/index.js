@@ -871,9 +871,10 @@ function planSet(d, args, scope = "") {
 	const start = planSteps(d, planId).find((s) => s.status !== "done") || null;
 	if (start) d.prepare("UPDATE steps SET status='active', started_at=? WHERE id=?").run(now(), start.id);
 	setCurrent(d, planId, start ? start.id : null);
-	// 【计划膨胀】记下"出生时几步"—— 论文实测：早期插入额外阶段可能反而降低表现，
-	// 所以"这个计划长了多少"应该是个看得见的数字，而不是感觉。
-	stSet(d, planId, "birth_steps", String(parsed.length));
+	// 【计划演进】记下"出生时**是哪些步骤**（按 id）" —— 只记步数是不够的：
+	// 只记数字就分不清"长大的"和"被整个换掉的"（4 步→4 步，其实计划可能全换了）。
+	// 判据必须是**稳定身份**，这也正是步骤身份跨修订稳定的用处。
+	stSet(d, planId, "birth_ids", JSON.stringify(ids));
 	stDel(d, planId, "resume_step");
 	setBudget(d, planId, 0);
 	stSet(d, planId, "detour_used", 0);
@@ -986,12 +987,7 @@ function planStatus(d, args, scope = "") {
 				return ["", `⏸ **在等**：${w}｜等到：${stGet(d, plan.id, "waiting_until", "")}｜第 ${wn}/${wl} 回合`,
 					`   超时之后 → ${stGet(d, plan.id, "waiting_timeout", "")}`];
 			})(),
-			// 【计划膨胀】论文（arXiv 2604.12147）实测：早期插入额外阶段可能反而降低表现 → 这个数字必须看得见
-			...(() => {
-				const b = Number(stGet(d, plan.id, "birth_steps", "0"));
-				const tot = planSteps(d, plan.id).length;
-				return b && tot > b ? [`📈 计划已从 ${b} 步长到 ${tot} 步（后加 ${tot - b}）—— 论文实测：早期插入额外阶段可能反而拖低表现`] : [];
-			})(),
+			...(inflationLine(d, plan.id) ? ["", ...inflationLine(d, plan.id).split("\n")] : []),
 			...(detail.detours.length ? ["", "额外步骤（从主线岔出去的工作，独立编号，跨修订连续）：", ...detail.detours.map((l) => "  " + l)] : []),
 			...(detail.revisions.length ? ["", "计划修订史（最近 5 次）：", ...detail.revisions.map((r) => {
 				const t = new Date(r.ts).toISOString().slice(11, 19);
@@ -2035,6 +2031,63 @@ function planAsk(d, args, scope = "", session = "") {
  *   这个是**用户要我做**的事（不记偏离 —— 用户改方向不是跑偏）。
  * 与 plan_rework 的区别：那个是重做某个旧步骤的产出，带 rework_of 链接。
  */
+/** 最长递增子序列长度 —— 论文 POC 用的就是它（只取首次出现的位置）。 */
+function lisLength(arr) {
+	const tails = [];
+	for (const x of arr) {
+		let lo = 0, hi = tails.length;
+		while (lo < hi) { const mid = (lo + hi) >> 1; if (tails[mid] < x) lo = mid + 1; else hi = mid; }
+		tails[lo] = x;
+	}
+	return tails.length;
+}
+
+/**
+ * 【计划演进度量】照搬 arXiv 2604.12147 的三维公式，但把「**轨迹 vs 计划**」换成「**最初计划 vs 现行计划**」。
+ *
+ *   PPC′ 覆盖 = |原 ∩ 现| / |原|          原步骤还有几个活着
+ *   POC′ 顺序 = LIS(原步骤在现行计划中的位置) / |原|   原计划的相对顺序有没有乱
+ *   PPF′ 保真 = |原| / |原 ∪ 现|          现行里有多少是原来就有的
+ *   PC′ 综合 = (PPC′ · POC′ · PPF′)^(1/3)  ← **几何平均**，论文原话：
+ *                                        "ensuring equal weighting and **preventing compensation** across dimensions"
+ *                                        一个维度烂，总分就得烂（算术平均会让满分维度把零分补回来）
+ *   膨胀率 = 1 − PPF′
+ *
+ * **判据是 step id**（稳定身份），不是文字比对 —— 所以"4 步变 4 步但全换了"也能被识别（膨胀率 50%），
+ * 而只记步数的老算法会说"没膨胀"。
+ *
+ * 论文也说清楚了立场：*"Including additional actions beyond those in the recommended plan is
+ * not necessarily negative, but can be distracting."* —— 所以这是**度量**，不是判罪。
+ */
+function planInflation(d, planId) {
+	let birth = [];
+	try { birth = JSON.parse(stGet(d, planId, "birth_ids", "[]")); } catch { birth = []; }
+	if (!birth.length) return null;
+	const now = planSteps(d, planId);
+	const nowIds = new Set(now.map((s) => Number(s.id)));
+	const birthSet = new Set(birth.map(Number));
+	const kept = [...birthSet].filter((id) => nowIds.has(id));
+	const union = new Set([...birthSet, ...nowIds]);
+	const PPC = kept.length / birthSet.size;
+	const PPF = birthSet.size / union.size;
+	const ordOf = new Map(now.map((s) => [Number(s.id), Number(s.ord)]));
+	const seq = [...birthSet].map((id) => ordOf.get(id)).filter((x) => x !== undefined);
+	const POC = seq.length ? lisLength(seq) / birthSet.size : 0;
+	const PC = Math.cbrt(PPC * POC * PPF);
+	return { birth: birthSet.size, now: nowIds.size, kept: kept.length, PPC, POC, PPF, PC, inflate: 1 - PPF };
+}
+
+/** 计划演进的一行显示（没变化就不显示）。 */
+function inflationLine(d, planId) {
+	const m = planInflation(d, planId);
+	if (!m) return "";
+	if (m.birth === m.now && m.kept === m.birth) return "";   // 一字未动，不啰嗦
+	const p = (x) => `${Math.round(x * 100)}%`;
+	return `📈 **计划演进**（原 ${m.birth} 步 → 现 ${m.now} 步，其中 ${m.kept} 步是原来的）`
+		+ `｜膨胀 ${p(m.inflate)} · 覆盖 ${p(m.PPC)} · 顺序 ${p(m.POC)} · 保真 ${p(m.PPF)} · 综合 ${p(m.PC)}`
+		+ `\n   （三维公式照搬 arXiv 2604.12147，把「轨迹 vs 计划」换成「最初计划 vs 现行计划」；判据是稳定 step id）`;
+}
+
 function planDetour(d, args, scope = "", session = "") {
 	const plan = activePlan(d, scope);
 	if (!plan) return { ok: false, reason: "当前项目没有生效计划 —— 没有主线，就谈不上「主线之外」。" };
@@ -2240,8 +2293,8 @@ function turnAnchorNotice(d, scope = "") {
 			].join("\n"), "plan anchor (wait timed out)");
 		}
 		stSet(d, plan.id, "waiting_turns", String(wn));
-		const _b = Number(stGet(d, plan.id, "birth_steps", "0"));
-		const _inflate = _b && steps.length > _b ? `｜📈 计划 ${_b}→${steps.length} 步` : "";
+		const _m = planInflation(d, plan.id);
+		const _inflate = _m && !(_m.birth === _m.now && _m.kept === _m.birth) ? `｜📈 膨胀 ${Math.round(_m.inflate * 100)}%` : "";
 		return notice(
 			`⏸【计划锚】在等：${wWhat}｜等到：${wUntil}｜第 ${wn}/${wlim} 回合${cur ? `｜（第 ${cur.ord} 步挂着）` : ""}${_inflate}`,
 			"plan anchor (waiting)"
@@ -2324,10 +2377,11 @@ function turnAnchorNotice(d, scope = "") {
 	} else {
 		bits.push("主线无进行中步骤");
 	}
-	// 【计划膨胀】长了多少，明说 —— 论文（arXiv 2604.12147）实测：早期插入额外阶段
-	// 可能反而降低表现，尤其当它不符合模型内在的解题策略时。所以这该是个看得见的数字。
-	const birth = Number(stGet(d, plan.id, "birth_steps", "0"));
-	if (birth && steps.length > birth) bits.push(`📈 计划已从 ${birth} 步长到 ${steps.length} 步（后加 ${steps.length - birth}）`);
+	// 【计划演进】按论文三维公式算（见 planInflation 的注释）
+	const _inf = planInflation(d, plan.id);
+	if (_inf && !(_inf.birth === _inf.now && _inf.kept === _inf.birth)) {
+		bits.push(`📈 计划演进：膨胀 ${Math.round(_inf.inflate * 100)}% · 覆盖 ${Math.round(_inf.PPC * 100)}% · 顺序 ${Math.round(_inf.POC * 100)}% · 保真 ${Math.round(_inf.PPF * 100)}%`);
+	}
 	bits.push(park ? `泊位 ${park} 条未处理` : "泊位空");
 	return notice(bits.join("｜") + "\n新发现的问题请先 plan_discover 显式判定处置（permit/defer/decline），不要直接开工。", "plan anchor");
 }
