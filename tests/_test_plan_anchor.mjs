@@ -123,7 +123,7 @@ console.log('\n--- 7. 回合锚：每回合第一次工具调用后注入一次�
 await fireUserTurn();
 let inj = await fire('read', { file_path: 'D:/x/Dockerfile' });
 check('回合锚已注入', noticeText(inj).includes('【计划锚】'), noticeText(inj));
-check('锚里带计划名与当前步', noticeText(inj).includes('把电梯 demo 上 Docker') && noticeText(inj).includes('第 2 步'), noticeText(inj));
+check('锚里带计划名与当前步', noticeText(inj).includes('把电梯 demo 上 Docker') && noticeText(inj).includes('写 Dockerfile'), noticeText(inj));
 check('锚里带泊位数', noticeText(inj).includes('泊位 1 条未处理'), noticeText(inj));
 check('来源标注为 plugin（不会被当成人发言）', inj[0]?.source?.kind === 'plugin' && inj[0]?.source?.plugin === 'plan-anchor', JSON.stringify(inj[0]?.source));
 inj = await fire('read', { file_path: 'D:/x/Dockerfile' });
@@ -1029,7 +1029,7 @@ const anchorOf = async () => {
   return noticeText(inj);
 };
 const a1 = await anchorOf();
-check('（①）第 1 次：给完整锚', a1.includes('要做：第 1 步') && !a1.includes('与上回合相同'), a1.slice(0, 120));
+check('（①）第 1 次：给完整锚', a1.includes('要做：AI1') && a1.includes('工作步') && !a1.includes('与上回合相同'), a1.slice(0, 120));
 const a2 = await anchorOf();
 check('（①）第 2 次没变化：缩成一行', a2.includes('与上回合相同'), a2.slice(0, 120));
 const a3 = await anchorOf();
@@ -1251,7 +1251,7 @@ const execAX = mkExec('D:\\projAX');
 await callIn('plan_set', { title: 'AX 计划', steps: ['AX1 工作步', { text: '请你看一下表现', kind: 'accept' }] }, execAX);
 const ancX = async () => { await userSays(execAX, '继续'); const inj = await fireIn('read', { file_path: 'ax.js' }, execAX); return noticeText(inj); };
 const c1x = await ancX();
-check('（验收步）步骤被标为验收步，不进工作步分母', c1x.includes('0/1 步'), c1x.slice(0, 160));
+check('（验收步）步骤被标为验收步，不进工作步分母', c1x.includes('工作步 0/1'), c1x.slice(0, 160));
 check('（验收步）完整锚里有"待你验收"', c1x.includes('待你验收 1 项'), c1x.slice(0, 220));
 const c2x = await ancX();
 check('（缩短版）缩短之后**仍然**带"待你验收"', c2x.includes('已缩短') && c2x.includes('待你验收 1 项'), c2x.slice(0, 220));

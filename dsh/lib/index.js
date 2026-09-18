@@ -2456,7 +2456,7 @@ function turnAnchorNotice(d, scope = "") {
 	if (n > 1) {
 		// 上回合变过、这回合没变 → 缩成一行
 		return notice(
-			`【计划锚】${plan.title}｜${doneN}/${steps.length} 步${cur ? `｜第 ${cur.ord} 步` : ""}${acc.length ? `｜👁 待你验收 ${acc.length} 项` : ""}${park ? `｜泊位 ${park}` : "｜泊位空"}（与上回合相同，已缩短）`,
+			`【计划锚】${plan.title}｜工作步 ${doneN}/${steps.length}${cur ? `｜要做：${cur.text}` : ""}${acc.length ? `｜👁 待你验收 ${acc.length} 项` : ""}${park ? `｜泊位 ${park}` : "｜泊位空"}（与上回合相同，已缩短）`,
 			"plan anchor (compact)"
 		);
 	}
@@ -2464,18 +2464,18 @@ function turnAnchorNotice(d, scope = "") {
 	// 【分两块】工作步骤（agent 做）与验收步骤（**请用户看**）混在一起显示过 ——
 	// 用户当场指出："感觉我们现在也没在做这个吧"（他以为"看我先表态"是要干的活）。
 	// 所以进度只算工作步骤，验收单独一节。
-	const bits = [`【计划锚】${plan.title}｜主线 ${doneN}/${steps.length} 步${dtInfo}`];
+	const bits = [`【计划锚】${plan.title}｜工作步 ${doneN}/${steps.length} 完成${dtInfo}`];
 	if (cur && cur.kind === "detour") {
 		const r = stGet(d, plan.id, "resume_step");
 		const rs = r ? stepById(d, Number(r)) : null;
 		bits.push(`在做额外步骤 ${cur.detour_no}：${cur.text}${rs ? `（主线第 ${rs.ord} 步已挂起）` : ""}`);
 	} else if (cur) {
-		bits.push(`要做：第 ${cur.ord} 步 ${cur.text}`);
+		bits.push(`要做：${cur.text}`);
 	} else {
 		// 【别撒谎】焦点落在验收步上时，不能直接说"都做完了" —— 得先看有没有**待办的工作步**。
 		// （实测踩到：第 34 步还没做，锚却说"✔ 要做的工作步骤都做完了"。）
 		const nextWork = steps.find((s) => s.status !== "done");
-		if (nextWork) bits.push(`要做：第 ${nextWork.ord} 步 ${nextWork.text}`);
+		if (nextWork) bits.push(`要做：${nextWork.text}`);
 		else if (acc.length) bits.push("✔ 要做的工作步骤都做完了（剩下的是等你验收）");
 		else bits.push("主线无进行中步骤");
 	}
