@@ -249,6 +249,17 @@ function stepById(d, id) {
 }
 function currentStep(d, planId) {
 	const id = stGet(d, planId, "current_step");
+	if (!id) return null;
+	const s = stepById(d, Number(id));
+	// 【验收步不是"当前要做的事"】—— 它是"请用户看的"。
+	// 不排除的话会出现「当前：主线第 32/31 步」这种 32>31 的自相矛盾（实测踩到过）。
+	if (s && s.kind === "accept") return null;
+	return s;
+}
+
+/** 当前**指到的**步骤（不受 accept 过滤影响）—— 给需要知道"焦点到底在哪"的地方用。 */
+function currentStepRaw(d, planId) {
+	const id = stGet(d, planId, "current_step");
 	return id ? stepById(d, Number(id)) : null;
 }
 function planSteps(d, planId) {
