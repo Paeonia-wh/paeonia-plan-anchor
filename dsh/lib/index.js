@@ -1295,6 +1295,27 @@ function planStepDone(d, args, scope = "", session = "") {
 		return null;
 	};
 
+	// 【强制点·N=1】提醒被无视 → 不许宣布完成
+	//
+	// 依据：论文实测"第一次提醒被无视后，后续被无视的概率 87.9%" →
+	// 提醒必须**第一次就带后果**，否则它只是噪音。
+	// 落点选在 plan_step_done（**不阻干活**，只是不让"不吭声就宣布完成"）。
+	if (hasUnansweredWarn(d, plan.id)) {
+		const g = gate([
+			"⛔ **先回应那条提醒，再宣布完成。**",
+			"",
+			"它响过一次，你还没回应 —— 而「不吭声就推进」正是这个工具要防的事。",
+			"回应是一句话的事（任选其一）：",
+			"  · 在推进这一步 → `plan_note` 说一句进展",
+			"  · 在做用户另外要的事 → `plan_detour` 开一条额外线",
+			"  · 卡住了 / 发现新问题 → `plan_discover` 处置",
+			"  · 不想做这一步了 → `plan_drop` 丢掉它",
+			"",
+			"（这道关卡不是不让你干活 —— 干活完全不受阻。它只是**不让你不吭声就宣布完成**。）"
+		].join("\n"));
+		if (g) return g;
+	}
+
 	const evidence = (args.evidence || "").trim();
 	if (!evidence) {
 		const g = gate("evidence 必填：凭什么算这一步做完了（跑了什么/看到了什么）。没有依据的完成不算完成。");
@@ -1488,6 +1509,9 @@ function urgentGate(d, args, plan, cur) {
 }
 
 function planDiscover(d, args, scope = "") {
+	// 【强制点】任何一次有意义的回应都清掉「提醒被无视」的水印
+	// （只用 scope —— 这几个函数里有的没有 session 参数，别依赖它）
+	{ const _p = activePlan(d, scope); if (_p) clearWarnUnanswered(d, _p.id); }
 	const plan = activePlan(d, scope);
 	if (!plan) {
 		return noPlanError();
@@ -1652,6 +1676,9 @@ function planDiscover(d, args, scope = "") {
 
 /** 5. plan_goto：显式改焦点（回到某步 / 把泊位条目提上来做）。必须写 reason。 */
 function planGoto(d, args, scope = "") {
+	// 【强制点】任何一次有意义的回应都清掉「提醒被无视」的水印
+	// （只用 scope —— 这几个函数里有的没有 session 参数，别依赖它）
+	{ const _p = activePlan(d, scope); if (_p) clearWarnUnanswered(d, _p.id); }
 	const plan = activePlan(d, scope);
 	if (!plan) return { ok: false, reason: "没有生效计划" };
 	const reason = (args.reason || "").trim();
@@ -1786,6 +1813,34 @@ function planClose(d, args, scope = "") {
 
 /** 7. plan_log：漂移台账（append-only，由代码自动写） */
 const COMPACT_KINDS = ["drift_warning", "on_track"];
+
+/**
+ * 【强制点】"提醒被无视"的水印。
+ *
+ * 依据（一手论文，2026-09-19 查）：
+ *   Effects of workload, work complexity, and repeated alerts on alert fatigue in a CDSS
+ *   (BMC Med Inform Decis Mak 2017; 126 万条提醒 · 112 名医生 · 4 年)
+ *   · **第一次提醒被无视后，后续同样提醒被无视的概率 = 87.9%** ✗
+ *     → 效力不是线性衰减，而是**第一次定生死** → **响 N 次再强制是浪费**（第 2、3 次本来就无效）
+ *   · 每多一条提醒，接受率降 30%；重复占比每 +5%，再降 10% → **重复就是毒**
+ *   · 每 +1 条/周的频率，回忆起内容降 41% → **频率是敌人**
+ * 所以本项目取 **N=1**：**第一次提醒就是完整形态（含后果）**，之后不重复。
+ *
+ * 机制：提醒响时打水印；**任何一次有意义的回应**（plan_note / plan_discover /
+ * plan_goto / plan_detour / 改计划）都清除水印。水印还在时，**plan_step_done 会被拦**
+ * —— 不阻干活，只是**不让你"不吭声就宣布完成"**。
+ */
+function markWarnUnanswered(d, planId) {
+	stSet(d, planId, "warn_unanswered", "1");
+}
+
+function clearWarnUnanswered(d, planId) {
+	if (stGet(d, planId, "warn_unanswered", "") === "1") stDel(d, planId, "warn_unanswered");
+}
+
+function hasUnansweredWarn(d, planId) {
+	return stGet(d, planId, "warn_unanswered", "") === "1";
+}
 
 function planCompact(d, args, scope = "", session = "") {
 	const plan = activePlan(d, scope);
@@ -2002,6 +2057,9 @@ function lineageDetours(d, plan) {
 
 /** 9a. plan_amend：原地改一步的内容（保留 id、状态、历史；编号不变） */
 function planAmend(d, args, scope = "") {
+	// 【强制点】任何一次有意义的回应都清掉「提醒被无视」的水印
+	// （只用 scope —— 这几个函数里有的没有 session 参数，别依赖它）
+	{ const _p = activePlan(d, scope); if (_p) clearWarnUnanswered(d, _p.id); }
 	const plan = activePlan(d, scope);
 	if (!plan) return { ok: false, reason: "当前项目没有生效计划" };
 	const s = stepById(d, Number(args.step_id));
@@ -2051,6 +2109,9 @@ function planAmend(d, args, scope = "") {
 
 /** 9b. plan_insert：在某一步之后插入步骤（当前焦点不会被带跑；编号顺延并明确告知） */
 function planInsert(d, args, scope = "") {
+	// 【强制点】任何一次有意义的回应都清掉「提醒被无视」的水印
+	// （只用 scope —— 这几个函数里有的没有 session 参数，别依赖它）
+	{ const _p = activePlan(d, scope); if (_p) clearWarnUnanswered(d, _p.id); }
 	const plan = activePlan(d, scope);
 	if (!plan) return { ok: false, reason: "当前项目没有生效计划" };
 	const reason = (args.reason || "").trim();
@@ -2115,6 +2176,9 @@ function planInsert(d, args, scope = "") {
 
 /** 9c. plan_drop：丢弃一步（只标记不删行；若丢的是当前步，焦点顺延到下一个待办） */
 function planDrop(d, args, scope = "") {
+	// 【强制点】任何一次有意义的回应都清掉「提醒被无视」的水印
+	// （只用 scope —— 这几个函数里有的没有 session 参数，别依赖它）
+	{ const _p = activePlan(d, scope); if (_p) clearWarnUnanswered(d, _p.id); }
 	const plan = activePlan(d, scope);
 	if (!plan) return { ok: false, reason: "当前项目没有生效计划" };
 	const s = stepById(d, Number(args.step_id));
@@ -2258,6 +2322,9 @@ function complianceLine(d, planId) {
 }
 
 function planNote(d, args, scope = "", session = "") {
+	// 【强制点】任何一次有意义的回应都清掉「提醒被无视」的水印
+	// （只用 scope —— 这几个函数里有的没有 session 参数，别依赖它）
+	{ const _p = activePlan(d, scope); if (_p) clearWarnUnanswered(d, _p.id); }
 	const plan = activePlan(d, scope);
 	if (!plan) return { ok: false, reason: "当前项目没有生效计划 —— 没有计划就没有预算可清。" };
 	const cur = currentStep(d, plan.id);
@@ -2507,6 +2574,9 @@ function inflationLine(d, planId) {
 }
 
 function planDetour(d, args, scope = "", session = "") {
+	// 【强制点】任何一次有意义的回应都清掉「提醒被无视」的水印
+	// （只用 scope —— 这几个函数里有的没有 session 参数，别依赖它）
+	{ const _p = activePlan(d, scope); if (_p) clearWarnUnanswered(d, _p.id); }
 	const plan = activePlan(d, scope);
 	if (!plan) return { ok: false, reason: "当前项目没有生效计划 —— 没有主线，就谈不上「主线之外」。" };
 	const text = (args.text || "").trim();
@@ -2797,6 +2867,8 @@ function turnAnchorNotice(d, scope = "") {
 		// 而质问其实走的是这里，所以没生效（实测 A 响、B 也响 → 抓到）。
 		const pendingWork = d.prepare("SELECT COUNT(*) c FROM steps WHERE plan_id=? AND kind='plan' AND status!='done'").get(plan.id).c;
 		if (!pendingWork) return null;
+		// 【强制点·N=1】第一次提醒就**打出水印**（依据见 markWarnUnanswered 的注释）
+		markWarnUnanswered(d, plan.id);
 		// 【计划遵守率】同上
 		stSet(d, plan.id, "ask_total", String(Number(stGet(d, plan.id, "ask_total", "0")) + 1));
 		stSet(d, plan.id, "ask_open", "1");
@@ -2821,7 +2893,12 @@ function turnAnchorNotice(d, scope = "") {
 			"  · 在推进**这一步** → `plan_note` 说一句进展（预算清零）",
 			"  · **在做用户另外要的事**（不是这一步）→ `plan_detour` 把它开成一条额外步骤：主线挂起、做完自动回来、**不计偏离**。别让它只活在对话里。",
 			"  · 卡住了 → `plan_discover` 处置，或 `plan_amend` 改这一步",
-			"  · 不想做了 → `plan_drop` 丢掉它 / `plan_set` 换计划"
+			"  · 不想做了 → `plan_drop` 丢掉它 / `plan_set` 换计划",
+			"",
+			"⛔ **这条提醒你收到第 1 次 —— 而它是有后果的**：",
+			"   在下次 `plan_step_done` 之前，你必须先回应它（上面四条任选，一句话就够）。",
+			"   依据：实测论文里，**第一次提醒被无视后，后续提醒被无视的概率是 87.9%** ——",
+			"   所以本项目不搞「响三次再强制」（那是浪费），**第一次就是完整形态**。"
 		].filter(Boolean).join("\n"), "plan anchor (stalled)");
 	}
 	if (n > 1) {

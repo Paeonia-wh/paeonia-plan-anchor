@@ -1346,9 +1346,47 @@ const r3 = await ancCA();
 check('（膨胀）第 3 次仍然是一行（不会退回全文）', r3.length < 100, `长度=${r3.length}`);
 // 状态一变 → 回到完整锚，且质问计数重置
 await fireIn('write', { file_path: 'ca.txt', content: 'x' }, execCA);
+// 【新关卡】质问响过之后会打水印 —— 不先回应就 plan_step_done 会被拦（这是设计意图，
+// 依据论文：第一次提醒被无视后 87.9% 会继续被无视）。所以先回应一句，再完成。
+await callIn('plan_note', { text: '我在做这一步的长活' }, execCA);
 await callIn('plan_step_done', { evidence: 'C1 做完了', confirm: true }, execCA);
 const afterCA = await ancCA();
 check('（膨胀）状态一变 → 立刻回到完整锚', afterCA.includes('【计划锚】') && !afterCA.includes('还是没动'), afterCA.slice(0, 160));
+
+console.log(`\n--- 70. 【强制点 N=1】提醒被无视 → 不许宣布完成（依据论文 87.9%）---`);
+async function 吵到质问响(exec) {
+  await callIn('plan_set', { title: '强制点', steps: ['第一步', '第二步'] }, exec);
+  let asked = '';
+  for (let i = 0; i < 6; i++) {
+    await userSays(exec, '继续');
+    // 【关键】质问是「回合锚」的形态，在**每回合第一次**工具调用后给 ——
+    // 所以要收 write 那一次的返回，收 read（第二次）永远收不到（我第一次就栽在这）。
+    const o = noticeText(await fireIn('write', { file_path: `fa${i}.txt`, content: 'x' }, exec));
+    if (o.includes('没有任何变化')) asked = o;
+  }
+  return asked;
+}
+const execFA = mkExec('D:\\projFA');
+const asked = await 吵到质问响(execFA);
+check('（强制点）质问响了', !!asked, asked.slice(0, 120));
+check('（强制点）提醒里写明"有后果"', asked.includes('是有后果的'), asked.slice(0, 300));
+check('（强制点）提醒里给出依据（87.9%）', asked.includes('87.9'), asked.slice(0, 400));
+await fireIn('write', { file_path: 'fa.txt', content: 'x' }, execFA);
+const blocked = await callIn('plan_step_done', { evidence: '第一步做完了，文件写好了', confirm: true }, execFA);
+check('（强制点·关键）没回应就宣布完成 → 被拦', blocked.refused, blocked.text.slice(0, 200));
+check('（强制点）拦住时给出四条出路', blocked.text.includes('plan_note') && blocked.text.includes('plan_detour') && blocked.text.includes('plan_discover'), blocked.text.slice(0, 400));
+// 回应一句 → 立刻放行
+await callIn('plan_note', { text: '我在做这一步的长活，进展是写好了' }, execFA);
+await fireIn('write', { file_path: 'fa2.txt', content: 'x' }, execFA);
+const passed = await callIn('plan_step_done', { evidence: '第一步做完了，文件写好了', confirm: true }, execFA);
+check('（强制点）回应一句之后 → 放行（回应即清零）', !passed.refused, passed.text.slice(0, 200));
+
+// 从没提醒过 → 不误拦
+const execFB = mkExec('D:\\projFB');
+await callIn('plan_set', { title: '没提醒过', steps: ['唯一一步'] }, execFB);
+await fireIn('write', { file_path: 'fb.txt', content: 'x' }, execFB);
+const normal = await callIn('plan_step_done', { evidence: '唯一一步做完了', confirm: true }, execFB);
+check('（强制点）从没提醒过 → 正常放行（不误拦）', !normal.refused, normal.text.slice(0, 200));
 
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
