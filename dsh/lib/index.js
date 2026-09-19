@@ -3330,7 +3330,9 @@ function observe(d, exec) {
 		&& exec.name && !READ_ONLY_TOOLS.has(exec.name)) {
 		shortWarned.add(exec.agent);
 		// 【别挤掉锚】提醒要和锚一起给（见 noticePlusAnchor 的注释）
-		return noticePlusAnchor(d, activePlan(d, exec.scope || ""), [
+		// 【注意】取计划要用 scopeOf(exec) —— 我第一版写成 exec.scope（**这个字段不存在**），
+		// 于是退化成 activePlan(d, "")，取到 scope 是空串的老计划，锚显示错了计划。
+		return noticePlusAnchor(d, activePlan(d, scopeOf(exec)), [
 			"🗒【记账提醒】你正在执行用户的**一句短指令**（他上一轮只说了几个字），**但没有先记账**。",
 			"   先问自己一句：这件事属于当前步吗？",
 			"   · 属于 → 继续（这条提醒不用管）",
