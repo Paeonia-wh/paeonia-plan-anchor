@@ -862,7 +862,7 @@ function anchorText(d, plan, opts = {}) {
 
 	if (park.length) {
 		const head = park.slice(0, 3).map((p) => `${parkLabel(d, p)} ${p.text}`).join("；");
-		lines.push(`🅿 泊位 ${park.length} 条未处理（一律先入泊，不要现在追）：${head}${park.length > 3 ? ` …另 ${park.length - 3} 条` : ""}`);
+		lines.push(`🅿 泊位 ${park.length} 条未处理（一律先入泊，不要现在追；要看内容用 plan_park）`);
 	} else {
 		lines.push("🅿 泊位空。");
 	}
@@ -2969,7 +2969,7 @@ function progressBriefing(d, plan) {
 		const dn = dts.filter((s) => s.status === "done").length;
 		lines.push(`额外步骤 ${dn}/${dts.length} 完成：${dts.map((s) => `额外${s.detour_no}「${s.text}」${s.status === "done" ? "✔" : "·"}`).join("；")}`);
 	}
-	lines.push(park.length ? `泊位 ${park.length} 条未处理：${park.map((p) => `${parkLabel(d, p)} ${p.text}`).join("；")}` : "泊位空");
+		lines.push(park.length ? `泊位 ${park.length} 条未处理（要看内容用 plan_park）` : "泊位空");
 	return lines.join("\n");
 }
 
@@ -3434,7 +3434,7 @@ function observe(d, exec) {
 			"   · 是你另外要的活 → `plan_detour` 记一条（别让它只活在对话里）",
 			"   · 拿不准 → `plan_ask`",
 			"   （由来：实测连着两轮把用户一句话直接当指令动手 —— 这个反射太快了）"
-		], "bookkeeping nudge");;
+		].join("\n"), "bookkeeping nudge");;
 	}
 
 	// ⓪ 用户信号：用户叫你停 / 问进度 / 要整理 / 追加需求。
