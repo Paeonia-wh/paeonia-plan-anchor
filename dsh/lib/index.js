@@ -2785,7 +2785,16 @@ function turnAnchorNotice(d, scope = "") {
 	if (_inf && !(_inf.birth === _inf.now && _inf.kept === _inf.birth)) {
 		bits.push(`📈 计划演进：膨胀 ${Math.round(_inf.inflate * 100)}% · 覆盖 ${Math.round(_inf.PPC * 100)}% · 顺序 ${Math.round(_inf.POC * 100)}% · 保真 ${Math.round(_inf.PPF * 100)}%`);
 	}
-	bits.push(park ? `泊位 ${park} 条未处理` : "泊位空");
+	// 【可见但不膨胀】只报条数 + **最新一条的标题** ——
+	// 报全文会膨胀（实测 5 条几百字）；只报条数又会让我忘了"挂着什么"。
+	// 标题足够提醒，细节用 plan_park 查。
+	if (park) {
+		const latest = d.prepare("SELECT text FROM parking WHERE plan_id=? AND status IN ('parked','escalated') ORDER BY id DESC LIMIT 1").get(plan.id);
+		const tip = latest ? "｜最新：" + String(latest.text).slice(0, 18) + "…（用 plan_park 看全部）" : "";
+		bits.push("泊位 " + park + " 条未处理" + tip);
+	} else {
+		bits.push("泊位空");
+	}
 	return notice(bits.join("｜") + "\n新发现的问题请先 plan_discover 显式判定处置（permit/defer/decline），不要直接开工。", "plan anchor");
 }
 
