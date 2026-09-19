@@ -1289,6 +1289,18 @@ function planStatus(d, args, scope = "") {
 					: "（在轨声明远少于提醒 → 多数提醒可能戳中了真的停摆）";
 				return [`📊 提醒统计：漂移提醒 ${warn} 次 · 在轨声明 ${ontrack} 次 · 关卡拒绝 ${refused} 次 · 完成 ${done} 步 ${hint}`];
 			})(),
+			// 【计划新鲜度】按论文的间隔（5 步）报一次；超过 3× 就升级为警告。
+			// 问的正是核心痛点：**计划跟上更新了吗**（不是"你推进了吗"）。
+			...(() => {
+				const f = freshnessOf(d, plan.id);
+				if (f < FRESH_OK) return [];
+				if (f < FRESH_WARN) return [`🕐 计划 ${f} 步前更新过`];
+				return [
+					`⚠ 计划已经 ${f} 步没更新了 —— 是这几步真的没有新东西，`,
+					`   还是你一路在追问题、却都没入库？（后者就是「无头苍蝇」）`,
+					`   入库任选：plan_discover（新发现）/ plan_note（在轨）/ plan_detour（额外线）/ plan_step_done（完成）`
+				];
+			})(),
 			...(reviewSince ? ["", "▶ 完成闸门开着：先用 `ask_user_question` 问用户「这个计划真的交付了吗？」，再用 `plan_review` 记录答复。"] : []),
 			...(muteLeft(d, plan.id) > 0 ? [`⏸ 主动提醒已静音，还剩 ${muteLeft(d, plan.id)} 次调用（静音不是免责，台账照记）`] : []),
 			...(sig.length ? ["", "漂移信号：" + sig.join("；")] : [])
@@ -1530,7 +1542,7 @@ function urgentGate(d, args, plan, cur) {
 function planDiscover(d, args, scope = "") {
 	// 【强制点】任何一次有意义的回应都清掉「提醒被无视」的水印
 	// （只用 scope —— 这几个函数里有的没有 session 参数，别依赖它）
-	{ const _p = activePlan(d, scope); if (_p) clearWarnUnanswered(d, _p.id); }
+	{ const _p = activePlan(d, scope); if (_p) { clearWarnUnanswered(d, _p.id); markFresh(d, _p.id); } }
 	const plan = activePlan(d, scope);
 	if (!plan) {
 		return noPlanError();
@@ -1697,7 +1709,7 @@ function planDiscover(d, args, scope = "") {
 function planGoto(d, args, scope = "") {
 	// 【强制点】任何一次有意义的回应都清掉「提醒被无视」的水印
 	// （只用 scope —— 这几个函数里有的没有 session 参数，别依赖它）
-	{ const _p = activePlan(d, scope); if (_p) clearWarnUnanswered(d, _p.id); }
+	{ const _p = activePlan(d, scope); if (_p) { clearWarnUnanswered(d, _p.id); markFresh(d, _p.id); } }
 	const plan = activePlan(d, scope);
 	if (!plan) return { ok: false, reason: "没有生效计划" };
 	const reason = (args.reason || "").trim();
@@ -1849,6 +1861,26 @@ const COMPACT_KINDS = ["drift_warning", "on_track"];
  * plan_goto / plan_detour / 改计划）都清除水印。水印还在时，**plan_step_done 会被拦**
  * —— 不阻干活，只是**不让你"不吭声就宣布完成"**。
  */
+/** 【计划新鲜度】距离上次"计划被更新"过了几次工具调用。
+ *  依据：arXiv 2604.12147 Table 1 —— Periodic Plan Reminder 的设置是
+ *  "**every five trajectory steps** re-inject the default plan"，效果是
+ *  "reduce plan violations and improve performance"。所以用同一单位（调用次数）。*/
+const FRESH_OK = 5;      // 论文的间隔：5 步以内算新鲜
+const FRESH_WARN = 15;   // 3× 论文间隔：再不动就该说话了
+
+function bumpFreshness(d, planId) {
+	if (!planId) return;
+	stSet(d, planId, "calls_since_update", String(Number(stGet(d, planId, "calls_since_update", "0")) + 1));
+}
+
+function markFresh(d, planId) {
+	if (planId) stSet(d, planId, "calls_since_update", "0");
+}
+
+function freshnessOf(d, planId) {
+	return Number(stGet(d, planId, "calls_since_update", "0"));
+}
+
 function markWarnUnanswered(d, planId) {
 	stSet(d, planId, "warn_unanswered", "1");
 }
@@ -2078,7 +2110,7 @@ function lineageDetours(d, plan) {
 function planAmend(d, args, scope = "") {
 	// 【强制点】任何一次有意义的回应都清掉「提醒被无视」的水印
 	// （只用 scope —— 这几个函数里有的没有 session 参数，别依赖它）
-	{ const _p = activePlan(d, scope); if (_p) clearWarnUnanswered(d, _p.id); }
+	{ const _p = activePlan(d, scope); if (_p) { clearWarnUnanswered(d, _p.id); markFresh(d, _p.id); } }
 	const plan = activePlan(d, scope);
 	if (!plan) return { ok: false, reason: "当前项目没有生效计划" };
 	const s = stepById(d, Number(args.step_id));
@@ -2130,7 +2162,7 @@ function planAmend(d, args, scope = "") {
 function planInsert(d, args, scope = "") {
 	// 【强制点】任何一次有意义的回应都清掉「提醒被无视」的水印
 	// （只用 scope —— 这几个函数里有的没有 session 参数，别依赖它）
-	{ const _p = activePlan(d, scope); if (_p) clearWarnUnanswered(d, _p.id); }
+	{ const _p = activePlan(d, scope); if (_p) { clearWarnUnanswered(d, _p.id); markFresh(d, _p.id); } }
 	const plan = activePlan(d, scope);
 	if (!plan) return { ok: false, reason: "当前项目没有生效计划" };
 	const reason = (args.reason || "").trim();
@@ -2197,7 +2229,7 @@ function planInsert(d, args, scope = "") {
 function planDrop(d, args, scope = "") {
 	// 【强制点】任何一次有意义的回应都清掉「提醒被无视」的水印
 	// （只用 scope —— 这几个函数里有的没有 session 参数，别依赖它）
-	{ const _p = activePlan(d, scope); if (_p) clearWarnUnanswered(d, _p.id); }
+	{ const _p = activePlan(d, scope); if (_p) { clearWarnUnanswered(d, _p.id); markFresh(d, _p.id); } }
 	const plan = activePlan(d, scope);
 	if (!plan) return { ok: false, reason: "当前项目没有生效计划" };
 	const s = stepById(d, Number(args.step_id));
@@ -2343,7 +2375,7 @@ function complianceLine(d, planId) {
 function planNote(d, args, scope = "", session = "") {
 	// 【强制点】任何一次有意义的回应都清掉「提醒被无视」的水印
 	// （只用 scope —— 这几个函数里有的没有 session 参数，别依赖它）
-	{ const _p = activePlan(d, scope); if (_p) clearWarnUnanswered(d, _p.id); }
+	{ const _p = activePlan(d, scope); if (_p) { clearWarnUnanswered(d, _p.id); markFresh(d, _p.id); } }
 	const plan = activePlan(d, scope);
 	if (!plan) return { ok: false, reason: "当前项目没有生效计划 —— 没有计划就没有预算可清。" };
 	const cur = currentStep(d, plan.id);
@@ -2595,7 +2627,7 @@ function inflationLine(d, planId) {
 function planDetour(d, args, scope = "", session = "") {
 	// 【强制点】任何一次有意义的回应都清掉「提醒被无视」的水印
 	// （只用 scope —— 这几个函数里有的没有 session 参数，别依赖它）
-	{ const _p = activePlan(d, scope); if (_p) clearWarnUnanswered(d, _p.id); }
+	{ const _p = activePlan(d, scope); if (_p) { clearWarnUnanswered(d, _p.id); markFresh(d, _p.id); } }
 	const plan = activePlan(d, scope);
 	if (!plan) return { ok: false, reason: "当前项目没有生效计划 —— 没有主线，就谈不上「主线之外」。" };
 	const text = (args.text || "").trim();
@@ -2856,6 +2888,12 @@ function turnAnchorNotice(d, scope = "") {
 			// 【豁免到期】重新问，而且问得更重 —— 因为"声明在轨这么久、计划却一步没动"本身就可疑
 			stDel(d, plan.id, "anchor_ack_sig");
 			stDel(d, plan.id, "anchor_ack_age");
+		// 【漏改修复】这里也必须看「还有没有活可干」—— 我今晚只在质问分支加了判断，
+		// 忘了这个 ack-expired 分支，于是计划全做完时它还在问「你声明在轨但计划没动」。
+		// 教训：**改判断类逻辑时，要把同一语义的每个分支都扫一遍。**
+		const pendingWork2 = d.prepare("SELECT COUNT(*) c FROM steps WHERE plan_id=? AND kind='plan' AND status!='done'").get(plan.id).c;
+		if (!pendingWork2) return null;
+		markWarnUnanswered(d, plan.id);
 			// 【计划遵守率】记一笔"质问发出"（可测量的事实，不是印象）
 			stSet(d, plan.id, "ask_total", String(Number(stGet(d, plan.id, "ask_total", "0")) + 1));
 			stSet(d, plan.id, "ask_open", "1");
@@ -2923,7 +2961,7 @@ function turnAnchorNotice(d, scope = "") {
 	if (n > 1) {
 		// 上回合变过、这回合没变 → 缩成一行
 		return notice(
-			`【计划锚】${plan.title}｜${progressText(doneN, steps.length)}${cur ? `｜要做：${cueShort(cur)}` : ""}${acc.length ? `｜👁 待你验收 ${acc.length} 项` : ""}${park ? `｜泊位 ${park}` : "｜泊位空"}（与上回合相同，已缩短）`,
+			`【计划锚】${plan.title}｜${progressText(doneN, steps.length)}${cur ? `｜要做：${cueShort(cur)}` : ""}${acc.length ? `｜👁 待你验收 ${acc.length} 项` : ""}${park ? `｜泊位 ${park}` : "｜泊位空"}${freshnessOf(d, plan.id) >= FRESH_OK ? `｜🕐 计划 ${freshnessOf(d, plan.id)} 步前更新过` : ""}（与上回合相同，已缩短）`,
 			"plan anchor (compact)"
 		);
 	}
@@ -2966,7 +3004,22 @@ function turnAnchorNotice(d, scope = "") {
 	} else {
 		bits.push("泊位空");
 	}
-	return notice(bits.join("｜") + "\n新发现的问题请先 plan_discover 显式判定处置（permit/defer/decline），不要直接开工。\n（**若你刚列了一串待办/计划外的新事项 → 先停下问用户，别自己决定。** 三条去向让他选：\n  · 现在做 → plan_detour 开一条额外线（主线挂着，做完自动回来，不计偏离）\n  · 记下回头做 → plan_discover 入泊（**必须写清「什么时候回来看它」**，到期回程票会主动提）\n  · 并进原计划 → plan_insert 插成主线步骤）", "plan anchor");
+	// 【计划新鲜度】按论文的间隔（5 步）报；超过 3× 升级为警告。
+	// 问的正是核心痛点：**计划跟上更新了吗**（不是「你推进了吗」）。
+	// ⚠️ 注意它必须在 turnAnchorNotice 里 —— 我第一版插到了 planStatus 里（改错地方）。
+	{
+		const _f = freshnessOf(d, plan.id);
+		if (_f >= FRESH_WARN) {
+			bits.push(`⚠ 计划已经 ${_f} 步没更新了 —— 是这几步真的没有新东西，还是你一路在追问题、却都没入库？（后者就是「无头苍蝇」）`);
+			bits.push("   入库任选：plan_discover（新发现）/ plan_note（在轨）/ plan_detour（额外线）/ plan_step_done（完成）");
+			markWarnUnanswered(d, plan.id);
+		} else if (_f >= FRESH_OK) {
+			bits.push(`🕐 计划 ${_f} 步前更新过`);
+		}
+	}
+	bits.push("新发现的问题请先 plan_discover 显式判定处置（permit/defer/decline），不要直接开工。");
+	bits.push("（若你刚列了一串待办 → **先停下问用户要不要入库**，别自己决定。三条去向：plan_detour 现在做 / plan_discover 记下回头做（必写回程条件）/ plan_insert 并进计划）");
+	return notice(bits.join("\n"), "plan anchor");
 }
 
 /** 漂移提醒：两档升级（轻 → 重），每档每步只响一次。 */
@@ -3540,6 +3593,8 @@ function observe(d, exec) {
 	const scope = scopeOf(exec); // 每会话各自的工作目录 → 各自的项目
 	const plan = activePlan(d, scope);
 	const toolName = exec.name;
+	// 【计划新鲜度】每次工具调用 +1（入库动作会清零）—— 单位与论文一致
+	if (plan && plan.id) bumpFreshness(d, plan.id);
 	// 没立计划时：默认完全不打扰（单步任务不该被啰嗦）。
 	// 但**改文件两次以上就该被看见**（学自 Task-Anchor 的 "No code without a lock"）——
 	// 这是我文档里承认过的边界一（"不调工具直接干活，护栏完全看不见"）目前唯一能补的部分。
