@@ -2496,6 +2496,21 @@ function planMute(d, args, scope = "") {
 // ---------- 通知（注入模型上下文的提醒） ----------
 
 /** 构造一条带来源归属的合成 user 消息 —— 抄官方 guard 的写法（不加标注会被当成用户发言）。 */
+/**
+ * 【别挤掉锚】一次性提醒不该独占那一轮的注入位置。
+ *
+ * 为什么必须修：锚是这工具最承重的一层（每回合把计划放回 AI 眼前），
+ * 被一次性提醒挤掉 = **那一轮 AI 看不到计划**。
+ * 更矛盾的是那条记账提醒 —— 它让人判断「这件事属于当前步吗」，
+ * **却偏偏把「当前步是什么」给挤掉了**（让 AI 判断一件事，却不给判断所需的材料）。
+ *
+ * 所以：需要单独提醒时用这个 helper —— **提醒在前，锚跟在后面**，两个都给。
+ */
+function noticePlusAnchor(d, plan, text, summary) {
+	const anchor = plan ? anchorText(d, plan) : "";
+	return notice(anchor ? text + "\n\n" + anchor : text, summary);
+}
+
 function notice(text, summary) {
 	const message = {
 		role: "user",
@@ -3314,7 +3329,8 @@ function observe(d, exec) {
 		&& !planTouched.get(exec.agent)
 		&& exec.name && !READ_ONLY_TOOLS.has(exec.name)) {
 		shortWarned.add(exec.agent);
-		return notice([
+		// 【别挤掉锚】提醒要和锚一起给（见 noticePlusAnchor 的注释）
+		return noticePlusAnchor(d, activePlan(d, exec.scope || ""), [
 			"🗒【记账提醒】你正在执行用户的**一句短指令**（他上一轮只说了几个字），**但没有先记账**。",
 			"   先问自己一句：这件事属于当前步吗？",
 			"   · 属于 → 继续（这条提醒不用管）",

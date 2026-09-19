@@ -140,7 +140,9 @@ for (let i = 1; i <= 60; i++) {
   const t = noticeText(out);
   if (t.includes('【计划锚 · 提醒】')) gentleAt = gentleAt < 0 ? i : gentleAt;
   else if (t.includes('【计划锚 · 二次提醒】')) firmAt = firmAt < 0 ? i : firmAt;
-  else if (t.includes('【计划锚】')) extra++;
+  // 【口径更新】记账提醒现在合理地带着锚（修掉了"提醒挤掉锚"的缺陷），要排除
+
+  else if (t.includes('【计划锚】') && !t.includes('记账提醒')) extra++;
 }
 check(`第 ${Math.ceil(12 - usedBudget)} 次触发轻提醒（预算耗尽）`, gentleAt === Math.ceil(12 - usedBudget), `gentleAt=${gentleAt} used=${usedBudget}`);
 check(`第 ${Math.ceil(24 - usedBudget)} 次触发重提醒（升级档）`, firmAt === Math.ceil(24 - usedBudget), `firmAt=${firmAt} used=${usedBudget}`);
