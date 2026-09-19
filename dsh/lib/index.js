@@ -2783,6 +2783,20 @@ function turnAnchorNotice(d, scope = "") {
 				"（豁免是有的，但**不会永久** —— 否则你漂走了也没人提醒你。）"
 			].join("\n"), "plan anchor (ack expired)");
 		}
+		// 【防墙纸·关键修复】**没活可干时不该质问。**
+		//
+		// 实测（用户原话）："计划锚今天提醒了我两次，我第二次已经有点想无视它了。
+		// 任何靠'弹提示'治错的机制都有这个衰减问题。"
+		// 查下去：我们的验收计划 31/31 全做完、主线无进行中步骤，
+		// 它还在问"你是真的在推进，还是卡住了？" —— **没活可干的时候问"是不是卡住了"，答案是废话。**
+		// 纯噪音 → 墙纸。而墙纸会让**真正该响的时候也不响**。
+		//
+		// 判据：还有没有**未完成的工作步骤**（kind='plan'）。
+		// 全做完 → 不质问（那时该走"完成闸门"让用户验收，不该催 agent）。
+		// 注：这一条要放在**质问分支内部** —— 我第一版加到了 driftNotice 里（改错地方），
+		// 而质问其实走的是这里，所以没生效（实测 A 响、B 也响 → 抓到）。
+		const pendingWork = d.prepare("SELECT COUNT(*) c FROM steps WHERE plan_id=? AND kind='plan' AND status!='done'").get(plan.id).c;
+		if (!pendingWork) return null;
 		// 【计划遵守率】同上
 		stSet(d, plan.id, "ask_total", String(Number(stGet(d, plan.id, "ask_total", "0")) + 1));
 		stSet(d, plan.id, "ask_open", "1");
@@ -2867,6 +2881,22 @@ function driftNotice(d, plan) {
 	const firm = escalateAt;
 	const stage = b >= firm ? "firm" : b >= gentle ? "gentle" : null;
 	if (!stage) return null;
+	// 【防墙纸·关键修复】**全部工作步都完成时，"没有进展"是正常状态 —— 不该质问。**
+	//
+	// 实测（用户原话）："计划锚今天提醒了我两次，我第二次已经有点想无视它了。"
+	// 查下去发现质问本身在误报：我们的验收计划已经 31/31 全做完、
+	// 主线无进行中步骤，它还在问"你是真的在推进，还是卡住了？" ——
+	// **没活可干的时候问"是不是卡住了"，答案当然是"没有"** → 纯噪音 → 墙纸。
+	//
+	// 这也印证了那条原则：**提醒的价值不在说了什么，在它变了没有。**
+	// 而更狠的一条是：**它有没有在"该说的时候"才说。**
+	//
+	// 判据：还有没有**未完成的工作步骤**（kind='plan'）。
+	// 全做完 → 不质问（那时该走"完成闸门"，让用户验收，而不是催 agent）。
+	const pendingWork = d.prepare("SELECT COUNT(*) c FROM steps WHERE plan_id=? AND kind='plan' AND status!='done'").get(plan.id).c;
+	if (!pendingWork) return null;
+	// 同理：连"进行中的步骤"都没有、却有未完成的 → 那是状态不一致，交给别的关卡，不在这儿喊。
+	if (!cur) return null;
 	// 同一档在同一步只响一次（fired 集合以 "stepId:stage" 为键）
 	const key = `${cur ? cur.id : 0}:${stage}`;
 	const fired = stGet(d, plan.id, "drift_fired", "");
