@@ -2766,7 +2766,7 @@ function turnAnchorNotice(d, scope = "") {
 		const rs = r ? stepById(d, Number(r)) : null;
 		bits.push(`在做额外步骤 ${cur.detour_no}：${cur.text}${rs ? `（主线${stepLabel(rs)}已挂起）` : ""}`);
 	} else if (cur) {
-		bits.push(`要做：${stepCue(cur)}`);   // stepCue 会带上「（验收：…）」—— 别绕过它
+		bits.push(`要做：${stepCue(cur).slice(0, 90)}`);   // 截断：防超长验收把锚撑爆（细节用 plan_status）
 	} else {
 		// 【别撒谎】焦点落在验收步上时，不能直接说"都做完了" —— 得先看有没有**待办的工作步**。
 		// （实测踩到：第 34 步还没做，锚却说"✔ 要做的工作步骤都做完了"。）
@@ -2775,7 +2775,7 @@ function turnAnchorNotice(d, scope = "") {
 		else if (acc.length) bits.push("✔ 要做的工作步骤都做完了（剩下的是等你验收）");
 		else bits.push("主线无进行中步骤");
 	}
-	if (acc.length) bits.push(`👁 待你验收 ${acc.length} 项：${acc.map((s) => s.text).join("；")}`);
+	if (acc.length) bits.push(`👁 待你验收 ${acc.length} 项（标题见 plan_status，别在这里列全文）`);
 	// 【缺口 2 修复】让"这个目录开了几条线"看得见 —— 允许开多条线，就必须让开了几条可见，
 	// 否则线太多没人收尾（政企场景里这比"线不够用"更常见）。
 	const others = otherActivePlans(d, plan.scope || "", plan.owner || "");
@@ -2783,7 +2783,7 @@ function turnAnchorNotice(d, scope = "") {
 	// 【计划演进】按论文三维公式算（见 planInflation 的注释）
 	const _inf = planInflation(d, plan.id);
 	if (_inf && !(_inf.birth === _inf.now && _inf.kept === _inf.birth)) {
-		bits.push(`📈 计划演进：膨胀 ${Math.round(_inf.inflate * 100)}% · 覆盖 ${Math.round(_inf.PPC * 100)}% · 顺序 ${Math.round(_inf.POC * 100)}% · 保真 ${Math.round(_inf.PPF * 100)}%`);
+		if (_inf.inflate > 0.3 || _inf.PPC < 0.5) bits.push(`📈 计划演进：膨胀 ${Math.round(_inf.inflate * 100)}% · 覆盖 ${Math.round(_inf.PPC * 100)}% · 顺序 ${Math.round(_inf.POC * 100)}% · 保真 ${Math.round(_inf.PPF * 100)}%`);
 	}
 	// 【可见但不膨胀】只报条数 + **最新一条的标题** ——
 	// 报全文会膨胀（实测 5 条几百字）；只报条数又会让我忘了"挂着什么"。
