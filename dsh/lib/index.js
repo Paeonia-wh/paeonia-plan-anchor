@@ -2898,7 +2898,7 @@ function turnAnchorNotice(d, scope = "") {
 			stSet(d, plan.id, "ask_total", String(Number(stGet(d, plan.id, "ask_total", "0")) + 1));
 			stSet(d, plan.id, "ask_open", "1");
 			return notice([
-				`⚠【计划锚】**你声明「在轨」已经 ${age} 回合了，但计划一步没动。**`,
+				`⚠【计划锚】**你声明「在轨」已经 ${age} 回合了，但计划一步没动（距上次入库 ${freshnessOf(d, plan.id)} 步）。**`,
 				complianceLine(d, plan.id),
 				cur ? `   还停在${stepLabel(cur)}「${cur.text}」（主线 ${doneN}/${steps.length}）` : `   主线无进行中步骤（${doneN}/${steps.length}）`,
 				"",
@@ -2937,12 +2937,12 @@ function turnAnchorNotice(d, scope = "") {
 		stSet(d, plan.id, "stale_asked", String(asked));
 		if (asked > 1) {
 			return notice(
-				`⚠【计划锚】计划还是没动（第 ${n} 轮没变化 · 这是第 ${asked} 次问）—— 在推进 / 卡住了 / 不做了？`,
+				`⚠【计划锚】计划还是没动（第 ${n} 轮没变化 · 距上次入库 ${freshnessOf(d, plan.id)} 步 · 这是第 ${asked} 次问）—— 在推进 / 卡住了 / 不做了？`,
 				"plan anchor (stale, repeat)"
 			);
 		}
 		return notice([
-			`⚠【计划锚】**计划已经 ${n} 回合没有任何变化** —— 还停在这里：`,
+			`⚠【计划锚】**计划已经 ${n} 回合没有任何变化**（距上次入库已经 ${freshnessOf(d, plan.id)} 步工具调用）—— 还停在这里：`,
 			complianceLine(d, plan.id),
 			cur ? `   ${stepLabel(cur)}「${cur.text}」（主线 ${doneN}/${steps.length}）` : `   主线无进行中步骤（${doneN}/${steps.length}）`,
 			park ? `   另有 ${park} 条欠账挂着。` : "",
