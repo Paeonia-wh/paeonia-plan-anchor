@@ -1329,5 +1329,24 @@ r = await callIn('plan_goto', { step_id: dId, reason: '回去补记那条额外�
 check('（补记·关键）plan_goto 不再拒绝额外步骤（原来只认主线）', !r.refused, r.text.slice(0, 220));
 check('（补记）切过去之后焦点确实在那条额外步骤上', r.text.includes('额外') || r.text.includes('一件额外的事'), r.text.slice(0, 260));
 
+console.log(`\n--- 69. 【注入膨胀】质问版不重复全文（实测 20 轮降 77%）---`);
+const execCA = mkExec('D:\\projCA');
+await callIn('plan_set', { title: '膨胀测试', steps: ['C1 一步'] }, execCA);
+const ancCA = async () => { await userSays(execCA, '继续'); const inj = await fireIn('read', { file_path: 'ca.js' }, execCA); return noticeText(inj); };
+await ancCA(); await ancCA();
+const r1 = await ancCA();
+check('（膨胀）第 1 次质问：给全文（含四条出路）', r1.includes('四选一') && r1.includes('plan_detour'), r1.slice(0, 200));
+check('（膨胀）全文那句话确实很长（>300 字）', r1.length > 300, `长度=${r1.length}`);
+const r2 = await ancCA();
+check('（膨胀·关键）第 2 次质问：压成一行，不再重复全文', !r2.includes('四选一') && r2.length < 100, `长度=${r2.length} · ${r2.slice(0, 120)}`);
+check('（膨胀）短版仍说清"还没动、第几次问、三选一"', r2.includes('还是没动') && /第 \d+ 次问/.test(r2), r2.slice(0, 160));
+const r3 = await ancCA();
+check('（膨胀）第 3 次仍然是一行（不会退回全文）', r3.length < 100, `长度=${r3.length}`);
+// 状态一变 → 回到完整锚，且质问计数重置
+await fireIn('write', { file_path: 'ca.txt', content: 'x' }, execCA);
+await callIn('plan_step_done', { evidence: 'C1 做完了', confirm: true }, execCA);
+const afterCA = await ancCA();
+check('（膨胀）状态一变 → 立刻回到完整锚', afterCA.includes('【计划锚】') && !afterCA.includes('还是没动'), afterCA.slice(0, 160));
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
