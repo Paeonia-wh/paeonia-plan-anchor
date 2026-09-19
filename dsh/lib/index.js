@@ -2591,6 +2591,8 @@ function turnAnchorNotice(d, scope = "") {
 	const n = prevSig === sig ? Number(stGet(d, plan.id, "anchor_sig_n", "0")) + 1 : 1;
 	stSet(d, plan.id, "anchor_sig", sig);
 	stSet(d, plan.id, "anchor_sig_n", String(n));
+	// 【注入膨胀修复】指纹一变（n===1）→ 质问计数归零，下次质问重新给全文
+	if (n === 1) stSet(d, plan.id, "stale_asked", "0");
 
 	if (n >= ANCHOR_STALE_AT) {
 		// 【问过就不再问】如果这个指纹已经被答复过（plan_note 声明在轨），就别再问第二遍 ——
@@ -2631,6 +2633,18 @@ function turnAnchorNotice(d, scope = "") {
 		// 【计划遵守率】同上
 		stSet(d, plan.id, "ask_total", String(Number(stGet(d, plan.id, "ask_total", "0")) + 1));
 		stSet(d, plan.id, "ask_open", "1");
+		// 【注入膨胀修复】实测：质问版全文 **349 字**，而它每回合都会重发 ——
+		// 一直不回应时，20 轮能烧 2400 字（≈1500 tokens），比"墙纸"更费上下文。
+		// 而且这违背我们自己的原则：**提醒的价值不在说了什么，在它变了没有。**
+		// 所以：**第一次给全文（含四条出路），之后压成一行。** 状态一变就重置回全文。
+		const asked = Number(stGet(d, plan.id, "stale_asked", "0")) + 1;
+		stSet(d, plan.id, "stale_asked", String(asked));
+		if (asked > 1) {
+			return notice(
+				`⚠【计划锚】计划还是没动（第 ${n} 轮没变化 · 这是第 ${asked} 次问）—— 在推进 / 卡住了 / 不做了？`,
+				"plan anchor (stale, repeat)"
+			);
+		}
 		return notice([
 			`⚠【计划锚】**计划已经 ${n} 回合没有任何变化** —— 还停在这里：`,
 			complianceLine(d, plan.id),
