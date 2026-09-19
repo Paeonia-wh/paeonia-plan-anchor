@@ -2856,7 +2856,7 @@ function turnAnchorNotice(d, scope = "") {
 	} else {
 		bits.push("泊位空");
 	}
-	return notice(bits.join("｜") + "\n新发现的问题请先 plan_discover 显式判定处置（permit/defer/decline），不要直接开工。", "plan anchor");
+	return notice(bits.join("｜") + "\n新发现的问题请先 plan_discover 显式判定处置（permit/defer/decline），不要直接开工。\n（**若你刚列了一串待办/计划外的新事项 → 先停下问用户，别自己决定。** 三条去向让他选：\n  · 现在做 → plan_detour 开一条额外线（主线挂着，做完自动回来，不计偏离）\n  · 记下回头做 → plan_discover 入泊（**必须写清「什么时候回来看它」**，到期回程票会主动提）\n  · 并进原计划 → plan_insert 插成主线步骤）", "plan anchor");
 }
 
 /** 漂移提醒：两档升级（轻 → 重），每档每步只响一次。 */
