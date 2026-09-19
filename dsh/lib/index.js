@@ -765,6 +765,18 @@ function verdictStats(d, planId, stepId = 0) {
 }
 
 /** 步骤的展示文本：标题 + 验收动作（操作级 cue）。 */
+/**
+ * 锚里显示"要做"的**唯一入口** —— 带截断。
+ *
+ * 为什么要抽：我第一版只在"完整锚"那一处加了 .slice(0, 90)，
+ * 结果"缩短版锚"和"下一步"两处漏了（**改一处漏一处**，今晚记下的第 140 条教训）。
+ * 抽成唯一入口之后，以后加锚的形态不会再漏。
+ */
+function cueShort(s, max = 90) {
+	const t = stepCue(s);
+	return t.length > max ? t.slice(0, max) + "…" : t;
+}
+
 function stepCue(s) {
 	if (!s) return "";
 	return s.acceptance ? `${s.text}（验收：${s.acceptance}）` : s.text;
@@ -850,7 +862,7 @@ function anchorText(d, plan, opts = {}) {
 			? `主线${stepLabel(r)}「${r.text}」已挂起 —— 做完 plan_step_done 会**自动回到主线${stepLabel(r)}**。`
 			: "主线当前没有挂起的步骤；做完 plan_step_done 会回到主线的下一个待办步。");
 	} else if (cur) {
-		lines.push(`▶ 要做：**${stepCue(cur)}**`);   // stepCue 带「（验收：…）」，别绕过它
+		lines.push(`▶ 要做：**${cueShort(cur)}**`);   // stepCue 带「（验收：…）」，别绕过它
 	} else {
 		lines.push("▶ 主线当前没有进行中的步骤。");
 	}
@@ -2801,7 +2813,7 @@ function turnAnchorNotice(d, scope = "") {
 	if (n > 1) {
 		// 上回合变过、这回合没变 → 缩成一行
 		return notice(
-			`【计划锚】${plan.title}｜${progressText(doneN, steps.length)}${cur ? `｜要做：${stepCue(cur)}` : ""}${acc.length ? `｜👁 待你验收 ${acc.length} 项` : ""}${park ? `｜泊位 ${park}` : "｜泊位空"}（与上回合相同，已缩短）`,
+			`【计划锚】${plan.title}｜${progressText(doneN, steps.length)}${cur ? `｜要做：${cueShort(cur)}` : ""}${acc.length ? `｜👁 待你验收 ${acc.length} 项` : ""}${park ? `｜泊位 ${park}` : "｜泊位空"}（与上回合相同，已缩短）`,
 			"plan anchor (compact)"
 		);
 	}
@@ -2815,12 +2827,12 @@ function turnAnchorNotice(d, scope = "") {
 		const rs = r ? stepById(d, Number(r)) : null;
 		bits.push(`在做额外步骤 ${cur.detour_no}：${cur.text}${rs ? `（主线${stepLabel(rs)}已挂起）` : ""}`);
 	} else if (cur) {
-		bits.push(`要做：${stepCue(cur).slice(0, 90)}`);   // 截断：防超长验收把锚撑爆（细节用 plan_status）
+		bits.push(`要做：${cueShort(cur)}`);   // 截断：防超长验收把锚撑爆（细节用 plan_status）
 	} else {
 		// 【别撒谎】焦点落在验收步上时，不能直接说"都做完了" —— 得先看有没有**待办的工作步**。
 		// （实测踩到：第 34 步还没做，锚却说"✔ 要做的工作步骤都做完了"。）
 		const nextWork = steps.find((s) => s.status !== "done");
-		if (nextWork) bits.push(`要做：${stepCue(nextWork)}`);
+		if (nextWork) bits.push(`要做：${cueShort(nextWork)}`);
 		else if (acc.length) bits.push("✔ 要做的工作步骤都做完了（剩下的是等你验收）");
 		else bits.push("主线无进行中步骤");
 	}
