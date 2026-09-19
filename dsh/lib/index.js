@@ -1234,6 +1234,15 @@ function planStatus(d, args, scope = "") {
 					: [];
 			})(),
 			...(integrityLine(d) ? [integrityLine(d)] : []),
+			// 【库体检】只在台账真的多时才显示（平时不啰嗦）
+			...(() => {
+				const total = d.prepare("SELECT COUNT(*) c FROM ledger").get().c;
+				if (total < 500) return [];
+				const kinds = COMPACT_KINDS.map(() => "?").join(",");
+				const compactable = d.prepare(`SELECT COUNT(*) c FROM ledger WHERE kind IN (${kinds})`).get(...COMPACT_KINDS).c;
+				const plans = d.prepare("SELECT COUNT(*) c FROM plans").get().c;
+				return [`📈 库体检：${plans} 个项目 · 台账 ${total} 条（其中 ${compactable} 条计数型可聚合）→ 要聚合调 plan_compact`];
+			})(),
 			// 【第 34 步的验收】把"漂移提醒 / 关卡拒绝 / 在轨声明"的统计摆出来 ——
 			// 让"这个提醒是不是误报"能被算，而不是靠回忆。
 			...(() => {
@@ -1764,6 +1773,46 @@ function planClose(d, args, scope = "") {
 }
 
 /** 7. plan_log：漂移台账（append-only，由代码自动写） */
+const COMPACT_KINDS = ["drift_warning", "on_track"];
+
+function planCompact(d, args, scope = "", session = "") {
+	const plan = activePlan(d, scope);
+	if (!plan) return { ok: false, reason: "当前项目没有生效计划" };
+	const marks = COMPACT_KINDS.map(() => "?").join(",");
+	const total = d.prepare("SELECT COUNT(*) c FROM ledger WHERE plan_id=?").get(plan.id).c;
+	const rows = d.prepare("SELECT kind, COUNT(*) c FROM ledger WHERE plan_id=? AND kind IN (" + marks + ") GROUP BY kind").all(plan.id, ...COMPACT_KINDS);
+	const del = rows.reduce((s, r) => s + r.c, 0);
+	if (!del) return { ok: true, briefing: "没什么可聚合的：本计划的台账里没有计数型记录（提醒 / 在轨声明）。\n（审计型记录一律保留：计划变更、关卡拒绝、入泊与关闭、取代、认领…）" };
+	const detail = rows.map((r) => r.kind + " " + r.c + " 条").join(" · ");
+	if (args.confirm !== true) {
+		return {
+			ok: true,
+			briefing: [
+				"【库体检 · 聚合预演】本计划台账里可聚合的计数型记录：",
+				"   " + detail,
+				"   共 " + del + " 条（占本计划台账 " + total + " 条）",
+				"",
+				"这些记录的内容在别处还有（步骤表有 evidence、统计只用次数），所以可以聚合。",
+				"**审计型记录一律不动**：计划变更 / 关卡拒绝 / 入泊与关闭 / 取代 / 认领 —— 那是「谁做了什么」的唯一凭据。",
+				"**泊位一条不动。**",
+				"",
+				"要真删 → 带 confirm: true 再调一次（会写一条聚合台账留痕）。"
+			].join("\n")
+		};
+	}
+	log(d, "compact", { planId: plan.id, ref: "用户确认", detail: "聚合了 " + detail + "（共 " + del + " 条计数型记录；审计型记录与泊位未动）", session });
+	const out = d.prepare("DELETE FROM ledger WHERE plan_id=? AND kind IN (" + marks + ")").run(plan.id, ...COMPACT_KINDS);
+	return {
+		ok: true,
+		briefing: [
+			"【已聚合】删掉 " + out.changes + " 条计数型记录（" + detail + "）",
+			"台账从 " + total + " 条 → " + (total - out.changes + 1) + " 条",
+			"保留：全部审计型记录 + 全部泊位 + 本次聚合的留痕记录。",
+			"（统计口径不变：原来的次数已写进这条留痕里。）"
+		].join("\n")
+	};
+}
+
 function planLog(d, args, scope = "") {
 	const limit = Math.max(1, Math.min(100, Number(args.limit ?? 20)));
 	// 【#8 的连锁】计划一旦归档（status='done'），activePlan 就不再返回它 →
@@ -3159,6 +3208,14 @@ function apply(ctx, config) {
 				user_said: { type: "string", description: "**用户同意/否决的原话**（照抄）。用户通过 ask_user_question 回答时用它 —— 那种回答不走用户消息，闸门看不见；抄原话是摆证据，不是自报。" }
 			},
 			exec: (a, x) => withRefs(d, a, scopeOf(x), planReview, sessionKeyOf(x && x.agent))
+		},
+		{
+			name: "plan_compact",
+			description: "库体检 + 显式聚合：只聚合「计数型」台账（提醒/在轨声明），保留全部审计型记录与泊位。默认只预演不删；带 confirm: true 才真删（并写留痕）。",
+			params: {
+				confirm: { type: "boolean", description: "要真删必须传 true（默认只预演）。删除是不可逆动作，本项目禁止静默删除。" }
+			},
+			exec: (a, x) => withRefs(d, a, scopeOf(x), (dd, aa, sc) => planCompact(dd, aa, sc, sessionKeyOf(x && x.agent)), sessionKeyOf(x && x.agent))
 		},
 		{
 			name: "plan_log",
