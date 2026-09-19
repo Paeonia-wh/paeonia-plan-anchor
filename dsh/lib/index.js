@@ -133,7 +133,9 @@ function open(config) {
 		};
 		// 【owner】这条计划归哪个会话。政企场景的硬要求：多会话同时干活时**不许互相踩**。
 		// 旧库默认空串 = 旧行为（按 scope 取最新一条）。
-		addCol("plans", "owner", "owner TEXT NOT NULL DEFAULT ''");
+		addCol("plans", "owner", "owner TEXT NOT NULL DEFAULT \'\'");
+		// 【#8 已完成终态】完成后要归档，不能永远挂在 active 上
+		addCol("plans", "done_at", "done_at INTEGER");
 		addCol("steps", "detour_no", "detour_no INTEGER NOT NULL DEFAULT 0");
 		// 操作级 cue：这一步"怎么做才算做完"（Rubinstein 2001：切换代价随 task cuing 下降）
 		addCol("steps", "acceptance", "acceptance TEXT NOT NULL DEFAULT ''");
@@ -518,7 +520,9 @@ function withRefs(d, args, scope, fn, session = "") {
 		// P4：护栏自身出错必须可见，但不阻断主流程
 		console.error("[plan-anchor] 引用解析出错（已跳过归一）:", e);
 	}
-	const out = fn(d, a, scope);
+	// 【别丢 session】原来只传三个参数 → 直接传函数名时 session 会丢（plan_claim 就栽在这）。
+	// 补上第四个参数；用闭包的老写法不受影响（它们忽略多余参数）。
+	const out = fn(d, a, scope, session);
 	CURRENT_SESSION = _prevSession;      // 还原
 	if (notes.length && out && typeof out === "object" && typeof out.briefing === "string") {
 		return { ...out, briefing: out.briefing + "\n" + notes.join("\n") };
@@ -1076,14 +1080,66 @@ function planSet(d, args, scope = "", session = "") {
 }
 
 /** 2. plan_status：回归锚 —— 随时回答"我在第几步、下一步、泊位几条、是否在漂" */
+/**
+ * 【#9 认领】把这个会话认领到一条**已存在**的计划上。
+ *
+ * 场景（用户今天实测到的真实需求）：换个会话接着做同一条线。
+ * 原来的三档规则里，第③档"目录有多条活跃线"时**不猜** → 返回 null →
+ * **新会话什么也看不到、也接不上**（它只会说"这是上一个会话的任务"然后不管）。
+ *
+ * 所以补一个显式的认领动作：**看得见（plan_status 列出来）+ 能接手（plan_claim）**。
+ * 配上已做的"不许互踩"和"能看见别人"，多会话协作三件套就齐了。
+ */
+function planClaim(d, args, scope = "", session = "") {
+	// 【注意】这里必须用**传进来的 session**，不能用全局 CURRENT_SESSION ——
+	// 'withRefs(d, a, scope, fn)' 的第 5 个参数没传时，CURRENT_SESSION 会是空串 →
+	// activePlan 走"没有会话信息"分支返回 all[0]（最新那条）→ 误判成"本会话已经有计划了"。
+	const mine = activePlan(d, scope, session);
+	if (mine) {
+		return { ok: false, reason: `本会话已经有计划了：『${mine.title}』（v${mine.version}）。要换线先把它收尾（plan_review）或让开（plan_set 带 replace）。` };
+	}
+	const id = Number(args.plan_id || 0);
+	if (!id) return { ok: false, reason: "plan_id 必填 —— 先 plan_status 看本目录有哪些线可以认领。" };
+	const t = d.prepare("SELECT * FROM plans WHERE id=?").get(id);
+	if (!t) return { ok: false, reason: `计划 #${id} 不存在。` };
+	if (t.scope !== scope) return { ok: false, reason: `计划 #${id} 不属于本目录（它的作用域是另一处）—— 跨目录认领会破坏"一个目录一个工作台"的前提。` };
+	if (t.status === "done") return { ok: false, reason: `『${t.title}』**已经完成了**，认领它没有意义 —— 要接着做就 plan_set 立新计划（带 reason）。` };
+	if (t.status !== "active") return { ok: false, reason: `『${t.title}』已经作废（superseded），不能再认领。` };
+	const prevOwner = t.owner || "（无）";
+	d.prepare("UPDATE plans SET owner=? WHERE id=?").run(session, id);
+	log(d, "claim", { planId: id, ref: `${prevOwner}→${session}`, detail: `认领了『${t.title}』`, session });
+	const ss = planSteps(d, id);
+	const dn = ss.filter((s) => s.status === "done").length;
+	return {
+		ok: true,
+		plan_id: id,
+		briefing: [
+			`【已认领】『${t.title}』（v${t.version}）· ${dn}/${ss.length} 步`,
+			"现在这个会话就在这条线上了 —— 回合锚会认它。",
+			prevOwner !== "（无）" && prevOwner !== session
+				? `（原来归会话 ${prevOwner}；如果你接手的是别人还没做完的活，记得跟对方说一声。）`
+				: ""
+		].filter(Boolean).join("\n")
+	};
+}
+
 function planStatus(d, args, scope = "") {
 	const plan = activePlan(d, scope);
 	if (!plan) {
-		return {
-			ok: true, has_plan: false,
-			// 失明时必须能诊断：把解析出来的作用域报出来，而不是笼统说"没有计划"
-			briefing: anchorText(d, null, { scopeHint: scope || "（本次调用拿不到会话工作目录，退化到默认作用域）" })
-		};
+		const head = anchorText(d, null, { scopeHint: scope || "（本次调用拿不到会话工作目录，退化到默认作用域）" });
+		// 【#9 认领】本会话没有计划时，**把本目录的线列出来** ——
+		// 原来只说一句"没有生效计划"，于是换个会话就什么也看不见、也接不上。
+		const avail = d.prepare("SELECT * FROM plans WHERE scope=? AND status IN ('active','done') ORDER BY (status='done') ASC, id DESC").all(scope);
+		if (!avail.length) return { ok: true, has_plan: false, briefing: head };
+		const lines = [head, "", "本目录还有这些计划（都不是本会话的）："];
+		for (const p of avail) {
+			const ss = planSteps(d, p.id);
+			const dn = ss.filter((s) => s.status === "done").length;
+			const tag = p.status === "done" ? "已完成" : dn === 1 && ss.length === 1 ? "没做完" : (dn === ss.length ? "做完了（等你确认）" : "没做完");
+			lines.push(`  · #${p.id} 『${p.title}』 ${dn}/${ss.length} 步 · ${tag}`);
+		}
+		lines.push("", "接着做哪条 → plan_claim({ plan_id: N })；开新的 → plan_set（带 reason）");
+		return { ok: true, has_plan: false, briefing: lines.join("\n"), claimable: avail.map((p) => p.id) };
 	}
 	const steps = planSteps(d, plan.id);
 	const cur = currentStep(d, plan.id);
@@ -1699,7 +1755,12 @@ function planClose(d, args, scope = "") {
 /** 7. plan_log：漂移台账（append-only，由代码自动写） */
 function planLog(d, args, scope = "") {
 	const limit = Math.max(1, Math.min(100, Number(args.limit ?? 20)));
-	const plan = activePlan(d, scope);
+	// 【#8 的连锁】计划一旦归档（status='done'），activePlan 就不再返回它 →
+	// 连它自己的台账都查不到了。而"可追溯"恰恰要求**已完成的计划也能查**。
+	// 所以这里回退到"本目录最近一条计划"（不限状态）。
+	const plan = activePlan(d, scope)
+		|| d.prepare("SELECT * FROM plans WHERE scope=? ORDER BY id DESC LIMIT 1").get(scope)
+		|| null;
 	const all = args.all === true;
 	// 默认只看**本计划**的台账：以前是全局的，B 项目能看到 A 项目的记录
 	// （红队抓到的；而我的测试当时只是靠 limit 窗口侥幸没撞上——测试通过不等于隔离成立）。
@@ -1771,6 +1832,11 @@ function planReview(d, args, scope = "") {
 	stDel(d, plan.id, "review_step");
 	if (args.confirmed === true) {
 		log(d, "plan_confirmed", { planId: plan.id, stepId, ref: "用户确认", detail: note || "用户确认计划完成" });
+		// 【#8 已完成终态】用户确认完成后**归档**（status='done'）。
+		// 为什么必须归档：之前只写台账、不改状态 → 已完成的计划**永远是 active** →
+		// ① 永远占着"活跃线"的位置 ② 新会话认领它会看到一条"31/31 完成"的活跃计划、
+		// 以为还有活干、也就不自己新建了。**"已完成"和"还活着"必须分得开。**
+		d.prepare("UPDATE plans SET status='done', done_at=? WHERE id=?").run(now(), plan.id);
 		const park = openParking(d, plan.id).length;
 		return {
 			ok: true,
@@ -2946,6 +3012,14 @@ function apply(ctx, config) {
 				carry: { type: "array", items: { type: "json" }, description: "换计划时的显式映射：[{from_step_id, to_index, relation, note}]，relation ∈ kept（保留并继承完成状态）| replaced（取代=返工，旧的做错了）| split（拆分）| merged（合并）。不写映射而旧步已完成 → 回执会把它吼出来" }
 			},
 			exec: (a, x) => withRefs(d, a, scopeOf(x), (dd, aa, sc) => planSet(dd, aa, sc, sessionKeyOf(x && x.agent)))
+		},
+		{
+			name: "plan_claim",
+			description: "把这个会话认领到一条**已存在**的计划上（换个会话接着做同一条线）。本会话已有计划时会拒绝 —— 要换线先收尾。",
+			params: {
+				plan_id: { type: "number", description: "必填。要认领的计划 id —— 先 plan_status 看本目录有哪些线可认领" }
+			},
+			exec: (a, x) => withRefs(d, a, scopeOf(x), (dd, aa, sc) => planClaim(dd, aa, sc, sessionKeyOf(x && x.agent)), sessionKeyOf(x && x.agent))
 		},
 		{
 			name: "plan_status",
