@@ -1129,7 +1129,12 @@ function planStatus(d, args, scope = "") {
 		const head = anchorText(d, null, { scopeHint: scope || "（本次调用拿不到会话工作目录，退化到默认作用域）" });
 		// 【#9 认领】本会话没有计划时，**把本目录的线列出来** ——
 		// 原来只说一句"没有生效计划"，于是换个会话就什么也看不见、也接不上。
-		const avail = d.prepare("SELECT * FROM plans WHERE scope=? AND status IN ('active','done') ORDER BY (status='done') ASC, id DESC").all(scope);
+		// 【防膨胀】完成的计划会越攒越多 —— 不能全列出来。
+		// 活的线全列（那才是要选的）；已完成的只列**最近 3 条**，多的只说个数。
+		const act = d.prepare("SELECT * FROM plans WHERE scope=? AND status='active' ORDER BY id DESC").all(scope);
+		const finAll = d.prepare("SELECT * FROM plans WHERE scope=? AND status='done' ORDER BY id DESC").all(scope);
+		const avail = [...act, ...finAll.slice(0, 3)];
+		const finMore = Math.max(0, finAll.length - 3);
 		if (!avail.length) return { ok: true, has_plan: false, briefing: head };
 		const lines = [head, "", "本目录还有这些计划（都不是本会话的）："];
 		for (const p of avail) {
@@ -1138,7 +1143,13 @@ function planStatus(d, args, scope = "") {
 			const tag = p.status === "done" ? "已完成" : dn === 1 && ss.length === 1 ? "没做完" : (dn === ss.length ? "做完了（等你确认）" : "没做完");
 			lines.push(`  · #${p.id} 『${p.title}』 ${dn}/${ss.length} 步 · ${tag}`);
 		}
-		lines.push("", "接着做哪条 → plan_claim({ plan_id: N })；开新的 → plan_set（带 reason）");
+		if (finMore) lines.push(`  （另有 ${finMore} 条更早的已完成计划，没列出来 —— 台账里还能查到）`);
+		lines.push(
+			"",
+			"接着做哪条 → plan_claim({ plan_id: N })",
+			"开一条新的 → plan_set（把要做成什么、分几步都写下来；有旧的活跃线时要带 reason）",
+			"（新任务、新规划都走 plan_set —— 它能把脑子里那几步落成磁盘上的计划，而不是留在聊天里）"
+		);
 		return { ok: true, has_plan: false, briefing: lines.join("\n"), claimable: avail.map((p) => p.id) };
 	}
 	const steps = planSteps(d, plan.id);
