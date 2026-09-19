@@ -1388,5 +1388,30 @@ await fireIn('write', { file_path: 'fb.txt', content: 'x' }, execFB);
 const normal = await callIn('plan_step_done', { evidence: '唯一一步做完了', confirm: true }, execFB);
 check('（强制点）从没提醒过 → 正常放行（不误拦）', !normal.refused, normal.text.slice(0, 200));
 
+console.log(`\n--- 71. 【配套①】旧计划有未回应的提醒 → 不许静默换掉它 ---`);
+async function 吵出未回应提醒(exec) {
+  await callIn('plan_set', { title: '旧计划', steps: ['第一步', '第二步'] }, exec);
+  for (let i = 0; i < 6; i++) {
+    await userSays(exec, '继续');
+    const o = noticeText(await fireIn('write', { file_path: `ga${i}.txt`, content: 'x' }, exec));
+    if (o.includes('是有后果的')) return true;
+  }
+  return false;
+}
+const execGA = mkExec('D:\\projGA');
+const got = await 吵出未回应提醒(execGA);
+check('（配套①）先制造出"未回应的提醒"', got, '');
+const r71a = await callIn('plan_set', { title: '新计划', steps: ['别的活'], reason: '我想换' }, execGA);
+check('（配套①·关键）旧计划有未回应提醒 + 不带 replace → 被拦', r71a.refused, r71a.text.slice(0, 200));
+check('（配套①）拦住时给出两条出路（回应它 / replace: true）', r71a.text.includes('plan_note') && r71a.text.includes('replace: true'), r71a.text.slice(0, 400));
+const r71b = await callIn('plan_set', { title: '新计划', steps: ['别的活'], reason: '确认整条换掉', replace: true }, execGA);
+check('（配套①）带 replace: true 显式换 → 放行', !r71b.refused, r71b.text.slice(0, 200));
+
+// 没有未回应提醒时 → 正常换计划（不误拦）
+const execGB = mkExec('D:\\projGB');
+await callIn('plan_set', { title: '干净旧计划', steps: ['一步'] }, execGB);
+const r71c = await callIn('plan_set', { title: '干净新计划', steps: ['别的'], reason: '换方向' }, execGB);
+check('（配套①）旧计划没有未回应提醒 → 正常换（不误拦）', !r71c.refused, r71c.text.slice(0, 200));
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

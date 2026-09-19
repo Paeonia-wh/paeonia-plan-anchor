@@ -935,6 +935,25 @@ function planSet(d, args, scope = "", session = "") {
 	// 做法：把 prev 置空，跳过"作废旧的 + 继承旧进度"那套，新计划与它**各活各的**。
 	// owner 让两边各看各的（activePlan 三档：自己的 / 目录唯一一条 / 多条不猜）。
 	// 显式取代别人的计划仍然可以：带 replace: true（那时才真的作废它，并写台账）。
+	// 【配套①】旧计划里有一条**你从没回应过**的提醒 ——
+	// 换计划本身可以（那是改方向），但不许把它**连同那条提醒一起静默换掉**（那正是漂移的定义）。
+	// 出路：① 先回应它  ② 带 replace: true 显式说明要整条换掉。
+	if (prev && !(prev.owner && session && prev.owner !== session) && hasUnansweredWarn(d, prev.id) && !args.replace) {
+		return {
+			ok: false,
+			reason: [
+				`⛔ **『${prev.title}』里有一条提醒你没回应过，先处理它再换计划。**`,
+				"",
+				"换计划是改方向，可以 —— 但不许把它**连同那条没回应的提醒一起静默换掉**（那正是漂移的定义）。",
+				"",
+				"两条出路：",
+				"  · 先回应它 → plan_note（一句话）/ plan_discover（处置）/ plan_drop（不做这一步了）",
+				"  · 确实要整条换掉 → 带 replace: true 再调一次，并在 reason 里说清为什么",
+				"",
+				"（依据：论文实测「第一次提醒被无视后，后续被无视的概率 87.9%」—— 所以提醒必须第一次就有后果。）"
+			].join("\n")
+		};
+	}
 	const _otherSession = !!(prev && prev.owner && session && prev.owner !== session);
 	if (_otherSession && !args.replace) {
 		prev = null;                    // 不动别人的 → 并存
