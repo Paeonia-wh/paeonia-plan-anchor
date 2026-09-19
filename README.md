@@ -1,12 +1,14 @@
 # plan-anchor · 计划锚
 
-> 一个**防漂移护栏**：把 AI 的多步计划从「上下文里的临时文字」变成「磁盘上的持久锚」。
+> 一个**防漂移护栏**：让 AI 跑多步计划时，不忘记原来要干什么。
+>
+> 做法是把计划从「上下文里的临时文字」变成「磁盘上的持久锚」——**每一轮都放回它眼前**。
 >
 > 仓库：<https://github.com/Paeonia-wh/paeonia-plan-anchor>
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Node](https://img.shields.io/badge/node-%E2%89%A522.13-brightgreen.svg)
-![Tests](https://img.shields.io/badge/tests-362%20assertions-success.svg)
+![Tests](https://img.shields.io/badge/tests-401%20assertions-success.svg)
 ![Host](https://img.shields.io/badge/host-DSH%20plugin-blueviolet.svg)
 
 ---
@@ -263,7 +265,7 @@ PC = (PPC · POC · PPF)^(1/3)
 | [`DESIGN.md`](DESIGN.md) | 设计推演：为什么这么设计、证据、被否掉的替代方案 |
 | [`AGENTS.md`](AGENTS.md) | 纪律层（别的宿主可直接当 `rules` / `AGENTS.md` 用） |
 | [`dsh/`](dsh/) | **参考实现**（DSH 插件本体） |
-| [`tests/`](tests/) | **362 项断言** + 极端场景仿真 |
+| [`tests/`](tests/) | **401 项断言** + 极端场景仿真 |
 | [`research/`](research/) | 调研与红队审计（**不含用户原话**） |
 | [`adapters/`](adapters/) | 怎么移植到别的宿主（MCP / Claude Code / Codex） |
 
