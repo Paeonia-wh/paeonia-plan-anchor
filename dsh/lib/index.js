@@ -2699,6 +2699,10 @@ function turnAnchorNotice(d, scope = "") {
 		else bits.push("主线无进行中步骤");
 	}
 	if (acc.length) bits.push(`👁 待你验收 ${acc.length} 项：${acc.map((s) => s.text).join("；")}`);
+	// 【缺口 2 修复】让"这个目录开了几条线"看得见 —— 允许开多条线，就必须让开了几条可见，
+	// 否则线太多没人收尾（政企场景里这比"线不够用"更常见）。
+	const others = otherActivePlans(d, plan.scope || "", plan.owner || "");
+	if (others.length) bits.push(`📂 本目录还有 ${others.length} 条别的活跃线（不是这个会话的）：${others.map((p) => `『${p.title}』`).join("、")}`);
 	// 【计划演进】按论文三维公式算（见 planInflation 的注释）
 	const _inf = planInflation(d, plan.id);
 	if (_inf && !(_inf.birth === _inf.now && _inf.kept === _inf.birth)) {
@@ -3170,6 +3174,11 @@ function apply(ctx, config) {
 
 	// ——— 回合边界：标记"本回合还没注入过锚"———
 	ctx.on("agent/pre-step", ({ agent, messages }, next) => {
+		// 【缺口 1 修复】钩子路径不走 withRefs，所以这里的 CURRENT_SESSION 原本是空串 →
+		// activePlan 退回"目录唯一一条" → **多会话并存时，锚会显示到别人的计划**
+		// （用户实测到：他开了新会话，我们这个会话的锚却显示新会话的计划）。
+		// 修法：钩子入口也认一次会话。
+		CURRENT_SESSION = sessionKeyOf(agent);
 		try {
 			const ums = Array.isArray(messages) ? messages.filter((m) => m && m.source && m.source.kind === "user") : [];
 			if (ums.length) {
@@ -3216,6 +3225,8 @@ function apply(ctx, config) {
 
 	// ——— 工具后置：计数漂移预算 + 注入提醒 ———
 	ctx.on("tools/post-execute", async (exec, _result, next) => {
+		// 【缺口 1 修复】同上：工具后置钩子也要认会话（它不在 withRefs 里）
+		CURRENT_SESSION = sessionKeyOf(exec && exec.agent);
 		let reminder = null;
 		try {
 			reminder = observe(d, exec);
@@ -3333,14 +3344,12 @@ function observe(d, exec) {
 		// 【注意】取计划要用 scopeOf(exec) —— 我第一版写成 exec.scope（**这个字段不存在**），
 		// 于是退化成 activePlan(d, "")，取到 scope 是空串的老计划，锚显示错了计划。
 		return noticePlusAnchor(d, activePlan(d, scopeOf(exec)), [
-			"🗒【记账提醒】你正在执行用户的**一句短指令**（他上一轮只说了几个字），**但没有先记账**。",
-			"   先问自己一句：这件事属于当前步吗？",
-			"   · 属于 → 继续（这条提醒不用管）",
-			"   · **不属于（是他另外要的活）→ `plan_detour` 记一条**，别让它只活在对话里",
-			"   · 拿不准 → `plan_ask` 或直接问他",
-			"（这条提醒每个会话只出现一次。由来：实测连着两轮把用户的一句话直接当指令动手，",
-			"  两次都是漂移提醒响了才回头补账 —— **\"把用户的话直接当指令\"这个反射太快了**。）"
-		].join("\n"), "bookkeeping nudge");
+			"🗒【记账提醒】你在执行**一句短指令**，但**没先记账**。",
+			"   · 属于当前步 → 继续",
+			"   · 是你另外要的活 → `plan_detour` 记一条（别让它只活在对话里）",
+			"   · 拿不准 → `plan_ask`",
+			"   （由来：实测连着两轮把用户一句话直接当指令动手 —— 这个反射太快了）"
+		], "bookkeeping nudge");;
 	}
 
 	// ⓪ 用户信号：用户叫你停 / 问进度 / 要整理 / 追加需求。
