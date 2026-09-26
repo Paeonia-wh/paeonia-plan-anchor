@@ -12,6 +12,9 @@ const TESTDB = join(TMP, 'plan-anchor-test.db');
 for (const f of [TESTDB, `${TESTDB}-wal`, `${TESTDB}-shm`]) {
   try { rmSync(f); } catch {}
 }
+// 备份/导出目录也要一起清干净：否则**上一次运行留下的备份**会让"恰好 1 个文件"这类断言误判。
+// （2026-09-20 实测踩到：残留的旧备份让 3 条断言假失败 —— 断言写得太依赖"目录里只有本次的产物"。）
+try { rmSync(join(TMP, 'backups'), { recursive: true, force: true }); } catch {}
 
 const mod = await import((await import('node:fs')).existsSync(new URL('../dsh-plan-anchor/lib/index.js', import.meta.url))
   ? new URL('../dsh-plan-anchor/lib/index.js', import.meta.url).href
@@ -73,7 +76,7 @@ const noticeText = (injected) => (injected[0] && injected[0].content[0].text) ||
 async function work(n = 1) { for (let i = 0; i < n; i++) await fire('read', { file_path: `w${i}.txt` }); }
 
 console.log('\n--- 1. 无计划时的状态查询 ---');
-let r = await call('plan_status', {});
+let r = await call('plan_status', { detail: 'full' });
 check('提示去立计划', r.text.includes('没有生效的计划'), r.text);
 
 console.log('\n--- 2. plan_set 立计划（I1：只允许一个 active 步骤）---');
@@ -85,7 +88,7 @@ console.log('\n--- 3. I3：不许可静默覆盖计划 ---');
 r = await call('plan_set', { title: '换个计划', steps: ['x'] });
 check('无 reason 被拒', r.refused, r.text);
 check('拒绝时说清理由', r.reason.includes('reason'), r.reason);
-r = await call('plan_status', {});
+r = await call('plan_status', { detail: 'full' });
 check('原计划未被改动', r.text.includes('把电梯 demo 上 Docker') && r.text.includes('（v1）'), r.text);
 
 console.log('\n--- 4. I2：新发现只能入泊，不能直接抢焦点 ---');
@@ -93,7 +96,7 @@ r = await call('plan_discover', { text: '发现基础镜像里的时区不对', 
 check('入泊成功（defer）', r.text.includes('已入泊 #1'), r.text);
 check('明确要求不要现在处理', r.text.includes('不要处理它'), r.text);
 check('并把焦点按回第 1 步', r.text.includes('主线第 1 步'), r.text);
-r = await call('plan_status', {});
+r = await call('plan_status', { detail: 'full' });
 check('泊位 1 条未处理', r.text.includes('泊位 1 条未处理'), r.text);
 check('当前步仍是第 1 步（未被抢占）', r.text.includes('工作步 0/6 完成'), r.text);
 
@@ -115,7 +118,7 @@ check('第 1 步完成 → 第 2 步', r.text.includes('第 1 步完成') && r.t
 check('已推进 1/6', r.text.includes('工作步 1/6 完成'), r.text);
 
 console.log('\n--- 6b. 回程票到期：主线第 1 步做完 → 主动举手提醒（ready-to-resume）---');
-r = await call('plan_status', {});
+r = await call('plan_status', { detail: 'full' });
 check('泊位 1 的重启条件（第 1 步之后）已到 → 主动提醒', r.text.includes('回程票到期') && r.text.includes('泊位 1'), r.text);
 check('并复述当初写的重启条件原文', r.text.includes('第 1 步做完之后'), r.text);
 
@@ -131,7 +134,7 @@ check('同一回合不重复注入', inj.length === 0, inj.length);
 
 console.log('\n--- 8. I8：漂移预算（连续 12 次调用无计划进展 → 提醒）---');
 // 预算从前面步骤继承而来，先读当前已用量，再算理论触发点（判据必须可对账，不能靠猜）
-const statusText = (await call('plan_status', {})).text;
+const statusText = (await call('plan_status', { detail: 'full' })).text;
 const usedBudget = Number((statusText.match(/已用 (\d+)\//) || [0, 0])[1]);
 console.log(`  (进入本节时漂移预算已用 ${usedBudget} 次)`);
 let gentleAt = -1, firmAt = -1, extra = 0;
@@ -179,7 +182,7 @@ for (let i = 1; i <= 30; i++) {
   if (out.length) mutedInjects++;
 }
 check('静音期间零打扰', mutedInjects === 0, mutedInjects);
-r = await call('plan_status', {});
+r = await call('plan_status', { detail: 'full' });
 check('静音期台账照记（静音不是免责）', r.text.includes('静音'), r.text);
 
 console.log('\n--- 12. 正式中断：只有阻塞当前步才允许立刻偏离 ---');
@@ -187,7 +190,7 @@ r = await call('plan_discover', { text: 'compose 起不来：端口被占用，�
 check('认定为正式中断', r.text.includes('正式中断'), r.text);
 check('原步骤标为阻塞', r.text.includes('已标记为 ⛔ 阻塞'), r.text);
 check('说明会自动回归', r.text.includes('自动'), r.text);
-r = await call('plan_status', {});
+r = await call('plan_status', { detail: 'full' });
 check('状态判定为偏离中', r.text.includes('偏离中'), r.text);
 check('阻塞步骤进入漂移信号', r.text.includes('阻塞中断中') || r.text.includes('阻塞'), r.text);
 
@@ -203,7 +206,7 @@ check('无 reason 被拒', r.refused, r.text);
 r = await call('plan_goto', { park_id: 1, reason: '时区确实影响第 3 步的镜像构建' });
 check('提取成功（用序号显示，不暴露数据库 id）', r.text.includes('已提取泊位 1'), r.text);
 check('标注为计划外工作', r.text.includes('计划外的工作'), r.text);
-r = await call('plan_status', {});
+r = await call('plan_status', { detail: 'full' });
 check('当前处于偏离态', r.text.includes('偏离态') || r.text.includes('偏离中'), r.text);
 await work();
 r = await call('plan_step_done', { evidence: '时区已设为 Asia/Shanghai' });
@@ -222,7 +225,7 @@ for (const ev of ['第 3 步完成：compose 三件套跑通', '第 4 步完成�
   await work();
   await call('plan_step_done', { evidence: ev });
 }
-r = await call('plan_status', {});
+r = await call('plan_status', { detail: 'full' });
 check('完成第 3、4、5 步后为 5/6', r.text.includes('工作步 5/6 完成'), r.text);
 await work();
 r = await call('plan_step_done', { evidence: '上线完成，健康检查通过' });
@@ -252,7 +255,7 @@ check('但 all 里能看到它已关闭（不是消失）', /告警通道还没�
 r = await call('plan_discover', { text: '告警阈值谁来定还没结论', disposition: 'defer', resume_when: '计划走完之后' });
 const parkB = Number(r.text.match(/已入泊 #(\d+)/)[1]);
 await call('plan_goto', { park_id: parkB, reason: '先看看这个' });
-const stepId = Number((await call('plan_status', {})).text.match(/第 1 步\(id=(\d+)\)/)[1]);
+const stepId = Number((await call('plan_status', { detail: 'full' })).text.match(/第 1 步\(id=(\d+)\)/)[1]);
 r = await call('plan_goto', { step_id: stepId, reason: '还是先回到主线' });
 check('能从偏离态跳回指定步骤', r.text.includes('焦点已切到第 1 步'), r.text);
 r = await call('plan_park', {});
@@ -261,7 +264,7 @@ r = await call('plan_log', { limit: 6 });
 check('台账把"中止偏离"与"完成偏离"区分开', r.text.includes('中止偏离'), r.text);
 
 console.log('\n--- 19. 偏离额度：不做禁令，只做可见的代价 ---');
-r = await call('plan_status', {});
+r = await call('plan_status', { detail: 'full' });
 check('额度已回血（完成计划步骤后 -1）', !r.text.includes('偏离额度已用尽'), r.text);
 // 连续提取泊位，直到超支（budget=3）
 const ids = [];
@@ -276,7 +279,7 @@ for (const id of ids) {
   await call('plan_step_done', { evidence: '处理完了' });
 }
 check('超支时明确写出代价（不禁止）', lastGoto !== null, 'goto 未执行');
-r = await call('plan_status', {});
+r = await call('plan_status', { detail: 'full' });
 check('额度超支后持续显示在锚上（可见化，非禁令）', r.text.includes('偏离额度已用尽'), r.text);
 check('同时明确声明不禁止', r.text.includes('不禁止'), r.text);
 
@@ -309,13 +312,13 @@ r = await call('plan_log', { limit: 40 });
 check('台账区分「新问题入泊」与「判定不做」两种去向', r.text.includes('新问题入泊') && r.text.includes('判定不做'), r.text);
 
 console.log(`\n--- 21. 两套编号：主线 1..n 与额外步骤 1..m 必须分别报清 ---`);
-r = await call('plan_status', {});
+r = await call('plan_status', { detail: 'full' });
 check('同时有「主线步骤」与「额外步骤」两节', r.text.includes('主线步骤：') && r.text.includes('额外步骤（从主线岔出去的工作，独立编号，跨修订连续）：'), r.text);
 check('主线步骤带 id 且标为主线第 N 步', /主线第 1 步\(id=\d+\)/.test(r.text), r.text);
 check('额外步骤独立编号（额外步骤1/额外步骤2）', /额外步骤1\(id=\d+\)/.test(r.text) && /额外步骤2\(id=\d+\)/.test(r.text), r.text);
 
 // 再岔一次，验证编号**继续往上走**（不复用主线序号、也不从 1 重来）—— 动态取号，不许硬编码
-const beforeNos = [...(await call('plan_status', {})).text.matchAll(/额外步骤(\d+)\(id=/g)].map((m) => Number(m[1]));
+const beforeNos = [...(await call('plan_status', { detail: 'full' })).text.matchAll(/额外步骤(\d+)\(id=/g)].map((m) => Number(m[1]));
 const maxBefore = beforeNos.length ? Math.max(...beforeNos) : 0;
 r = await call('plan_discover', { text: '又发现一个待办：构建缓存没配', disposition: 'defer', resume_when: '计划走完之后' });
 const parkD = Number(r.text.match(/已入泊 #(\d+)/)[1]);
@@ -323,7 +326,7 @@ r = await call('plan_goto', { park_id: parkD, reason: '它影响第 1 步的验�
 const newNo = Number((r.text.match(/记为额外步骤 (\d+)/) || [0, 0])[1]);
 check('提取泊位时标注记为额外步骤 N，且 N = 上一个最大号 + 1', newNo === maxBefore + 1, `newNo=${newNo} maxBefore=${maxBefore} :: ${r.text}`);
 check('并明确说明挂起的是主线第几步', /主线第\s*\d+\s*步/.test(r.text), r.text);
-r = await call('plan_status', {});
+r = await call('plan_status', { detail: 'full' });
 check('锚头同时报两层进度', /工作步 \d+\/\d+ 完成｜额外步骤 \d+\/\d+ 完成/.test(r.text), r.text);
 check('正在做额外步骤时，明确回答"主线哪一步被挂起"', r.text.includes(`额外步骤${newNo}`) && /主线第\s*\d+\s*步/.test(r.text), r.text);
 await work();
@@ -362,16 +365,16 @@ check('A 项目立计划成功', !r.refused && r.text.includes('项目A的计划
 // 关键判据：B 项目立计划**不需要 reason** —— 说明 A 的计划没有串到 B
 r = await callIn('plan_set', { title: '项目B的计划', steps: ['B1 只有一步'] }, execB);
 check('B 项目立计划无需 reason（A 的计划没串过来）', !r.refused && r.text.includes('项目B的计划'), r.text);
-r = await callIn('plan_status', {}, execA);
+r = await callIn('plan_status', { detail: 'full' }, execA);
 check('A 只看到自己的计划', r.text.includes('项目A的计划') && !r.text.includes('项目B的计划'), r.text);
 check('A 的主线是 0/2', r.text.includes('工作步 0/2 完成'), r.text);
-r = await callIn('plan_status', {}, execB);
+r = await callIn('plan_status', { detail: 'full' }, execB);
 check('B 只看到自己的计划（尾斜杠归一化生效）', r.text.includes('项目B的计划') && !r.text.includes('项目A的计划'), r.text);
 check('B 的主线是 0/1', r.text.includes('工作步 0/1 完成'), r.text);
 await callIn('plan_step_done', { evidence: 'A 的第一个动作做完了' }, execA);
-r = await callIn('plan_status', {}, execB);
+r = await callIn('plan_status', { detail: 'full' }, execB);
 check('B 仍停在 0/1（没被 A 的推进带动）', r.text.includes('工作步 0/1 完成'), r.text);
-r = await call('plan_status', {});
+r = await call('plan_status', { detail: 'full' });
 check('默认作用域（本测试主线）完全没被污染', r.text.includes('下一阶段：加监控告警'), r.text);
 r = await callIn('plan_log', {}, execA);
 check('台账也按项目隔离', !r.text.includes('把电梯 demo 上 Docker'), r.text);
@@ -410,7 +413,7 @@ r = await callIn('plan_set', {
 }, execC);
 check('立计划成功（对象形式的步骤被接受）', !r.refused, r.text);
 check('锚行带出该步的验收动作', r.text.includes('（验收：docker build 通过且镜像 <200MB）'), r.text);
-r = await callIn('plan_status', {}, execC);
+r = await callIn('plan_status', { detail: 'full' }, execC);
 check('步骤表里也带验收', r.text.includes('写 Dockerfile（验收：docker build 通过且镜像 <200MB）'), r.text);
 check('未完成的步骤也能看到它的验收标准（判据前置）', r.text.includes('写 compose 编排（验收：docker compose up 后三个服务 healthy）'), r.text);
 
@@ -420,14 +423,14 @@ let inj3 = await fireIn('write', { file_path: 'D:/projC/Dockerfile', content: 'F
 check('范围内写入：注入为空（observe 档不打扰）', inj3.length === 0, inj3.length);
 await fireIn('write', { file_path: 'D:/projC/ci.yml', content: 'x' }, execC);
 await fireIn('read', { file_path: 'D:/projC/other.js' }, execC);
-r = await callIn('plan_status', {}, execC);
+r = await callIn('plan_status', { detail: 'full' }, execC);
 check('判决统计出现在 plan_status（观察档的仪表盘）', r.text.includes('scope 判决') && r.text.includes('observe 档'), r.text);
 check('范围内写入记为 match', r.text.includes('match 1'), r.text);
 check('范围外写入记为 out-of-scope（并要求人工看误报）', r.text.includes('out-of-scope 1') && r.text.includes('误报'), r.text);
 check('越界「读」单独记为 read-outside（不算越界改，压误报）', r.text.includes('read-outside 1'), r.text);
 check('observe 档全程没有打扰', true, '');
 // 判决是 append-only 记录，可回溯
-r = await callIn('plan_status', {}, execB);
+r = await callIn('plan_status', { detail: 'full' }, execB);
 check('B 项目看不到 C 的判决（隔离）', !r.text.includes('out-of-scope'), r.text);
 
 console.log(`\n--- 27. 重规划不许把欠账弄丢（仿真抓出的真 bug，已修）---`);
@@ -443,7 +446,7 @@ check('重规划后：欠账**仍然挂着**（不再丢失）', r.text.includes
 check('搬迁时到期提醒被重置（步骤编号对不上）', !r.text.includes('主线第 1 步后'), r.text);
 
 console.log(`\n--- 28. 绕开工具直接改数据库 → 可检测（不是无痕）---`);
-r = await callIn('plan_status', {}, execD);
+r = await callIn('plan_status', { detail: 'full' }, execD);
 check('正常状态下没有一致性告警', !r.text.includes('一致性异常'), r.text);
 {
   const { DatabaseSync } = await import('node:sqlite');
@@ -453,7 +456,7 @@ check('正常状态下没有一致性告警', !r.text.includes('一致性异常'
   db.close();
   console.log(`   （已直接删除泊位 #${victim.id}，绕过插件）`);
 }
-r = await callIn('plan_status', {}, execD);
+r = await callIn('plan_status', { detail: 'full' }, execD);
 check('篡改被检测出来', r.text.includes('一致性异常'), r.text);
 check('告警点名了具体是哪条泊位', /一致性异常：台账里入泊过的 #\d+/.test(r.text), r.text);
 check('告警说明缘由（绕开工具直接改库）', r.text.includes('无痕篡改'), r.text);
@@ -475,7 +478,7 @@ for (let i = 1; i <= 2; i++) {
 }
 check('最后一步做完 → 闸门开启，不许自称完成', r.text.includes('计划还不能算完成'), r.text);
 check('并明确要求用 ask_user_question 问用户', r.text.includes('ask_user_question'), r.text);
-r = await callIn('plan_status', {}, execE);
+r = await callIn('plan_status', { detail: 'full' }, execE);
 check('plan_status 显示「待用户确认完成」', r.text.includes('待用户确认完成'), r.text);
 
 r = await callIn('plan_review', { confirmed: true }, execE);
@@ -485,7 +488,7 @@ check('拒绝依据是可观测事实（没有任何用户发言）', r.text.inc
 await userTurn(execE); // 模拟用户真的回话了
 r = await callIn('plan_review', { confirmed: false, note: 'E2 没做完，回归测试没跑' }, execE);
 check('用户说没完成 → 最后一步被如实退回（不是嘴上改口）', r.text.includes('没完成') && r.text.includes('退回未完成'), r.text);
-r = await callIn('plan_status', {}, execE);
+r = await callIn('plan_status', { detail: 'full' }, execE);
 check('退回后焦点回到那一步', /工作步 1\/2 完成/.test(r.text), r.text);
 
 await fireIn('read', { file_path: 'e2.js' }, execE);
@@ -503,7 +506,7 @@ for (const ev of ['调研完成', '配置写完']) {
   await fireIn('read', { file_path: 'f.js' }, execF);
   await callIn('plan_step_done', { evidence: ev }, execF);
 }
-r = await callIn('plan_status', {}, execF);
+r = await callIn('plan_status', { detail: 'full' }, execF);
 check('起点：工作步 2/5，焦点在第 3 步', r.text.includes('工作步 2/5 完成') && /▶ 主线第 3 步\(id=\d+\) 3 写代码/.test(r.text), r.text);
 // 注意：step_id 是**数据库 id**，不是序号 —— 模型也要从 plan_status 里读它
 const idOfOrd = (text, ord) => { const m = text.match(new RegExp(`主线第 ${ord} 步\\(id=(\\d+)\\)`)); return m ? Number(m[1]) : 0; };
@@ -513,7 +516,7 @@ check('能从步骤表里读出第 4 步的 id', id4 > 0, `id4=${id4}`);
 // ① 原地改一步：把「4 测试」改成「4 集成测试」
 r = await callIn('plan_amend', { step_id: id4, text: '4 集成测试', acceptance: '集成环境里三个服务互通', reason: '测试要拆细' }, execF);
 check('amend：编号不变、身份不变', r.text.includes('编号未变、身份未变、历史保留'), r.text);
-r = await callIn('plan_status', {}, execF);
+r = await callIn('plan_status', { detail: 'full' }, execF);
 check('amend 后进度仍是 2/5（没有归零）', r.text.includes('工作步 2/5 完成'), r.text);
 check('amend 后第 4 步文字已改', r.text.includes('4 集成测试（验收：集成环境里三个服务互通）'), r.text);
 
@@ -521,7 +524,7 @@ check('amend 后第 4 步文字已改', r.text.includes('4 集成测试（验收
 r = await callIn('plan_insert', { after_step_id: id4, steps: ['5 压测', { text: '6 观察', acceptance: '看一天指标' }], reason: '上线前要压测' }, execF);
 check('insert：明确告知编号顺延', r.text.includes('编号已顺延'), r.text);
 check('insert：明确告知身份与完成状态没被带跑', r.text.includes('没有被带跑'), r.text);
-r = await callIn('plan_status', {}, execF);
+r = await callIn('plan_status', { detail: 'full' }, execF);
 check('insert 后工作步 2/7（进度保住）', r.text.includes('工作步 2/7 完成'), r.text);
 check('insert 后焦点仍在第 3 步（没被带跑）', /▶ 主线第 3 步\(id=\d+\) 3 写代码/.test(r.text), r.text);
 check('insert 后原第 5 步「上线」变成第 7 步', /主线第 7 步\(id=\d+\) 5 上线/.test(r.text), r.text);
@@ -531,14 +534,14 @@ check('已完成的 1、2 步始终是 ✔', /✔ 主线第 1 步\(id=\d+\) 1 �
 r = await callIn('plan_drop', { step_id: id4, reason: '环境里没有集成环境，改在本地跑' }, execF);
 check('drop：明确告知编号收拢', r.text.includes('编号已收拢'), r.text);
 check('drop：说明行没被删除、历史可查', r.text.includes('行没有被删除'), r.text);
-r = await callIn('plan_status', {}, execF);
+r = await callIn('plan_status', { detail: 'full' }, execF);
 check('drop 后工作步 2/6，进度仍保住', r.text.includes('工作步 2/6 完成'), r.text);
 check('被丢弃的步骤仍列在步骤表里（标 ⊘丢弃）', /⊘丢弃 主线第 4 步\(id=\d+\) 4 集成测试/.test(r.text), r.text);
 check('修订史记录了三种修订', r.text.includes('原地改') && r.text.includes('插入') && r.text.includes('丢弃'), r.text);
 check('步骤文字里过时的旧编号会被标注出来（不改你的字，但不许悄悄错）', r.text.includes('是旧编号'), r.text);
 
 // ④ 锚行必须主动说"计划刚修订过"
-r = await callIn('plan_status', {}, execF);
+r = await callIn('plan_status', { detail: 'full' }, execF);
 check('锚行提示计划刚修订过', r.text.includes('⚠ 计划刚修订过'), r.text);
 
 // ⑤ 对比：用 plan_set 整份重建会怎样（回执必须如实说明代价）
@@ -556,7 +559,7 @@ await callIn('plan_step_done', { evidence: '杂事做完了' }, execG);
 r = await callIn('plan_set', { title: 'G 计划改版', steps: ['G1 新', 'G2'], reason: '需求变了' }, execG);
 r = await callIn('plan_discover', { text: 'G 的第二件杂事', disposition: 'permit' }, execG);
 check('重规划后新偏离记为额外步骤 2（不重启）', r.text.includes('额外步骤 2'), r.text);
-r = await callIn('plan_status', {}, execG);
+r = await callIn('plan_status', { detail: 'full' }, execG);
 check('额外步骤计数跨版本连续（2 条都在）', r.text.includes('额外步骤 1/2 完成') || r.text.includes('额外步骤 1/2'), r.text);
 
 console.log(`\n--- 32. 【批 1】漂移提醒必须真的进台账（以前是假的：写了"已记录"却没记）---`);
@@ -584,7 +587,7 @@ for (let i = 1; i <= 4; i++) {
   const done = await callIn('plan_step_done', { evidence: `第 ${i} 个问题处理完了` }, execI);
   if (i === 4) gotos.push(done);
 }
-r = await callIn('plan_status', {}, execI);
+r = await callIn('plan_status', { detail: 'full' }, execI);
 check('偏离额度已被 permit 消耗（超支可见）', r.text.includes('偏离额度已用尽'), r.text);
 
 console.log(`\n--- 34. 【批 1】同一目录的不同写法必须归到同一作用域（否则护栏静默失明）---`);
@@ -594,12 +597,12 @@ const execJ3 = { agent: { session: { header: { cwd: 'D:\\projJ\\.' } } } };
 const execJ4 = { agent: { session: { header: { cwd: '\\\\?\\D:\\projJ' } } } };
 await callIn('plan_set', { title: 'J 计划', steps: ['J1', 'J2'] }, execJ1);
 for (const [label, e] of [['正斜杠 D:/projJ', execJ2], ['尾 \\. ', execJ3], ['\\\\?\\ 前缀', execJ4]]) {
-  const out = await callIn('plan_status', {}, e);
+  const out = await callIn('plan_status', { detail: 'full' }, e);
   check(`${label} 能查到同一份计划（不失明）`, out.text.includes('J 计划'), out.text);
 }
 // 失明时必须能诊断：没计划时说清解析出来的作用域
 const execJ5 = { agent: { session: { header: { cwd: 'D:\\projNobody' } } } };
-r = await callIn('plan_status', {}, execJ5);
+r = await callIn('plan_status', { detail: 'full' }, execJ5);
 check('确实没计划时报出作用域，便于诊断路径问题', r.text.includes('本项目作用域'), r.text);
 
 console.log(`\n--- 35. 【批 1】台账默认只看本计划（以前跨项目可见）---`);
@@ -614,7 +617,7 @@ const execK = { agent: { session: { header: { cwd: 'D:\\projK' } } } };
 await callIn('plan_set', { title: 'K 计划', steps: [{ text: 'K1', files: ['K1.md'] }, 'K2'] }, execK);
 await callIn('plan_mute', { reason: '测试静音', calls: 50 }, execK);
 await fireIn('write', { file_path: 'D:/projK/other.md', content: 'x' }, execK);
-r = await callIn('plan_status', {}, execK);
+r = await callIn('plan_status', { detail: 'full' }, execK);
 check('静音期间 scope 判决仍在记录（判决没被一起停掉）', r.text.includes('out-of-scope 1'), r.text);
 check('同时显示静音仍生效', r.text.includes('静音'), r.text);
 
@@ -627,7 +630,7 @@ for (let i = 0; i < 8; i++) {
   if (!out.refused) { releasedL = true; break; }
 }
 check('磨关最终被放行', releasedL, `released=${releasedL}`);
-r = await callIn('plan_status', {}, execL);
+r = await callIn('plan_status', { detail: 'full' }, execL);
 check('步骤表里标出「熔断放行」', r.text.includes('熔断放行'), r.text);
 
 console.log(`\n--- 38. 已完成区冻结：已完成的步骤不能被丢弃（对齐 Camunda）---`);
@@ -635,18 +638,18 @@ const execM = { agent: { session: { header: { cwd: 'D:\\projM' } } } };
 await callIn('plan_set', { title: 'M 计划', steps: ['M1', 'M2', 'M3'] }, execM);
 await fireIn('read', { file_path: 'm.js' }, execM);
 await callIn('plan_step_done', { evidence: 'M1 做完了' }, execM);
-let st = (await callIn('plan_status', {}, execM)).text;
+let st = (await callIn('plan_status', { detail: 'full' }, execM)).text;
 const idOf = (t, ord) => { const m = t.match(new RegExp(`主线第 ${ord} 步\\(id=(\\d+)\\)`)); return m ? Number(m[1]) : 0; };
 r = await callIn('plan_drop', { step_id: idOf(st, 1), reason: '不想要这步了' }, execM);
 check('丢弃已完成的步骤 → 被拒', r.refused, r.text);
 check('拒绝理由点明"已完成是历史，不是草稿"', r.text.includes('已完成') && r.text.includes('历史'), r.text);
 check('并指路 amend / plan_set', r.text.includes('plan_amend') && r.text.includes('plan_set'), r.text);
-r = await callIn('plan_status', {}, execM);
+r = await callIn('plan_status', { detail: 'full' }, execM);
 check('进度没被抹掉（仍 1/3）', r.text.includes('工作步 1/3 完成'), r.text);
 // 未完成的步骤仍然可以丢
 r = await callIn('plan_drop', { step_id: idOf(r.text, 3), reason: 'M3 不做了' }, execM);
 check('未完成的步骤照常可丢', !r.refused && r.text.includes('已丢弃'), r.text);
-r = await callIn('plan_status', {}, execM);
+r = await callIn('plan_status', { detail: 'full' }, execM);
 check('丢弃未完成步骤后：已完成的那步还在（1/2）', r.text.includes('工作步 1/2 完成') && /✔ 主线第 1 步\(id=\d+\) M1/.test(r.text), r.text);
 // 连带隐患：不能切到一个已丢弃的步骤
 const droppedId = (r.text.match(/⊘丢弃 主线第 2 步\(id=(\d+)\)/) || [0, 0])[1];
@@ -656,13 +659,13 @@ check('不能切到已丢弃的步骤（否则会把它复活）', r.refused, r.
 console.log(`\n--- 39. 回程票按步骤身份存：中间插入不会让它指错步（修的是真 bug）---`);
 const execN = { agent: { session: { header: { cwd: 'D:\\projN' } } } };
 await callIn('plan_set', { title: 'N 计划', steps: ['N1', 'N2', 'N3'] }, execN);
-let stN = (await callIn('plan_status', {}, execN)).text;
+let stN = (await callIn('plan_status', { detail: 'full' }, execN)).text;
 r = await callIn('plan_discover', { text: 'N 的欠账', disposition: 'defer', resume_when: 'N2 之后', resume_after_ord: 2 }, execN);
 check('回执复述重启条件', r.text.includes('主线第 2 步'), r.text);
 check('内部已换算成步骤身份', r.text.includes('resume_after_step_id') || r.text.includes('主线第 2 步做完时'), r.text);
 // 在第 1 步后面插一步 → 原第 2 步顺延为第 3 步
 await callIn('plan_insert', { after_step_id: idOf(stN, 1), steps: ['N1.5'], reason: '补一步' }, execN);
-stN = (await callIn('plan_status', {}, execN)).text;
+stN = (await callIn('plan_status', { detail: 'full' }, execN)).text;
 check('插入后原第 2 步顺延为第 3 步', /主线第 3 步\(id=\d+\) N2/.test(stN), stN);
 check('回程票跟着身份走：显示为"主线第 3 步之后"并标出旧号', stN.includes('主线第 3 步之后') && stN.includes('原来写的是第 2 步'), stN);
 // 做完 N1 与 N1.5（= 第 1、2 步）—— 此时**不该**到期
@@ -670,12 +673,12 @@ for (const ev of ['N1 完成', 'N1.5 完成']) {
   await fireIn('read', { file_path: 'n.js' }, execN);
   await callIn('plan_step_done', { evidence: ev }, execN);
 }
-stN = (await callIn('plan_status', {}, execN)).text;
+stN = (await callIn('plan_status', { detail: 'full' }, execN)).text;
 check('做到第 2 步（N1.5）时回程票**还没**到期 —— 这就是修复的意义', !stN.includes('回程票到期'), stN);
 // 做完 N2（现在的第 3 步）—— 这时才该到期
 await fireIn('read', { file_path: 'n.js' }, execN);
 r = await callIn('plan_step_done', { evidence: 'N2 完成' }, execN);
-stN = (await callIn('plan_status', {}, execN)).text;
+stN = (await callIn('plan_status', { detail: 'full' }, execN)).text;
 check('做到 N2 时才到期（正确时机，不是错位的那个序号）', stN.includes('回程票到期'), stN);
 
 console.log(`\n--- 40. 【③】换计划的显式映射：kept 继承 / replaced 返工 / 未认领会被吼出来 ---`);
@@ -689,7 +692,7 @@ for (const ev of ['调研完成', '配置写完了']) {
 r = await callIn('plan_set', { title: 'OA 第二版', steps: ['A', 'B'], reason: '结构大改' }, execOA);
 check('未写映射时，已完成的旧步骤被明确吼出来', r.text.includes('没有被任何映射认领'), r.text);
 check('并给出两条出路：kept 认领 / replaced 返工', r.text.includes('kept') && r.text.includes('replaced'), r.text);
-r = await callIn('plan_status', {}, execOA);
+r = await callIn('plan_status', { detail: 'full' }, execOA);
 check('新计划从 0 开始（因为没认领）', r.text.includes('工作步 0/2 完成'), r.text);
 
 // (b) 带映射：第 1 步保留（继承完成状态），第 2 步取代=返工
@@ -699,7 +702,7 @@ for (const ev of ['调研做得很扎实', '配置写完但写错了']) {
   await fireIn('read', { file_path: 'ob.js' }, execOB);
   await callIn('plan_step_done', { evidence: ev }, execOB);
 }
-let stOB = (await callIn('plan_status', {}, execOB)).text;
+let stOB = (await callIn('plan_status', { detail: 'full' }, execOB)).text;
 const idOB1 = idOf(stOB, 1), idOB2 = idOf(stOB, 2);
 check('起点：OB 2/3', stOB.includes('工作步 2/3 完成'), stOB);
 r = await callIn('plan_set', {
@@ -714,7 +717,7 @@ r = await callIn('plan_set', {
 check('回执说明「完成状态已继承」', r.text.includes('完成状态') && r.text.includes('已继承'), r.text);
 check('回执说明新第 2 步是返工', r.text.includes('返工') && r.text.includes('取代旧第 2 步'), r.text);
 check('并提醒下游要复查', r.text.includes('下游步骤'), r.text);
-r = await callIn('plan_status', {}, execOB);
+r = await callIn('plan_status', { detail: 'full' }, execOB);
 check('继承生效：新计划直接是 1/3（不是 0/3）', r.text.includes('工作步 1/3 完成'), r.text);
 check('焦点落在返工那一步（第 2 步），不是第 1 步', /▶ 主线第 2 步\(id=\d+\) OB2 重写配置/.test(r.text), r.text);
 check('步骤表标出返工关系', r.text.includes('🔁 返工：取代 #'), r.text);
@@ -723,7 +726,7 @@ check('已被认领的步骤不再出现在"未认领"清单里（E2E 抓到的�
 // 返工做完 → 计划才推进
 await fireIn('read', { file_path: 'ob2.js' }, execOB);
 await callIn('plan_step_done', { evidence: '配置重写完成，这次对过了' }, execOB);
-r = await callIn('plan_status', {}, execOB);
+r = await callIn('plan_status', { detail: 'full' }, execOB);
 check('返工完成后 → 2/3', r.text.includes('工作步 2/3 完成'), r.text);
 
 console.log(`\n--- 41. 【你的场景】做到第 5 步时发现第 1 步做错了 → 当场开返工 ---`);
@@ -734,7 +737,7 @@ for (const ev of ['方案定了', '库建好了']) {
   await fireIn('read', { file_path: 'p.js' }, execP);
   await callIn('plan_step_done', { evidence: ev }, execP);
 }
-let stP = (await callIn('plan_status', {}, execP)).text;
+let stP = (await callIn('plan_status', { detail: 'full' }, execP)).text;
 check('起点：做到第 3 步（2/5）', stP.includes('工作步 2/5 完成') && /▶ 主线第 3 步\(id=\d+\) P3 写接口/.test(stP), stP);
 const idP1 = idOf(stP, 1);
 // 发现第 1 步"定方案"做错了
@@ -747,7 +750,7 @@ check('把原第 1 步标为已完成的记录也算事实写出来', r.text.inc
 check('【关键】提醒下游要复查并给出步号', r.text.includes('下游有 4 步') && r.text.includes('第 2、3、4、5 步'), r.text);
 check('说明不计入偏离额度（纠错不是跑偏）', r.text.includes('不计入偏离额度'), r.text);
 check('手上那步被挂起、返工做完自动回来', r.text.includes('已挂起') && r.text.includes('自动回到它'), r.text);
-r = await callIn('plan_status', {}, execP);
+r = await callIn('plan_status', { detail: 'full' }, execP);
 check('步骤表里能看到返工支线', r.text.includes('🔁 返工：取代 #'), r.text);
 check('返工期间主线进度保持 2/5（没被搅乱）', r.text.includes('工作步 2/5 完成'), r.text);
 // 做完返工 → 自动回到主线第 3 步
@@ -763,31 +766,31 @@ console.log(`\n--- 42. 【批 2】四条：自我误伤 / 目录通配 / 只读�
 // (A) 计划自己的工具不该被 scope 判决
 const execQ = { agent: { session: { header: { cwd: 'D:\\projQ' } } } };
 await callIn('plan_set', { title: 'Q 计划', steps: [{ text: 'Q1', files: ['Q1.md'] }, 'Q2'] }, execQ);
-await callIn('plan_status', {}, execQ);
+await callIn('plan_status', { detail: 'full' }, execQ);
 await callIn('plan_set', { title: 'Q 计划', steps: [{ text: 'Q1', files: ['Q1.md'] }, 'Q2'], reason: '顺手重立一次' }, execQ);
-r = await callIn('plan_status', {}, execQ);
+r = await callIn('plan_status', { detail: 'full' }, execQ);
 check('(A) plan_* 自己的调用不产生任何判决（自我误伤已修）', r.text.includes('本步暂无记录'), r.text);
 
 // (B) 目录通配要能命中绝对路径
 await callIn('plan_set', { title: 'Q2 计划', steps: [{ text: '改源码', files: ['src/*.ts'] }, 'Q2b'], reason: '测通配' }, execQ);
 await fireIn('write', { file_path: 'D:/projQ/src/a.ts', content: 'x' }, execQ);
-r = await callIn('plan_status', {}, execQ);
+r = await callIn('plan_status', { detail: 'full' }, execQ);
 check('(B) files:[src/*.ts] 命中绝对路径 → match（不再误判越界）', r.text.includes('match 1') && !r.text.includes('out-of-scope'), r.text);
 await fireIn('write', { file_path: 'D:/projQ/other/b.md', content: 'y' }, execQ);
-r = await callIn('plan_status', {}, execQ);
+r = await callIn('plan_status', { detail: 'full' }, execQ);
 check('(B) 范围外仍是 out-of-scope（没有把判决放宽成废纸）', r.text.includes('out-of-scope 1'), r.text);
 
 // (C) 只读工具算半次 + 额度用尽要可见
 const execR = { agent: { session: { header: { cwd: 'D:\\projR' } } } };
 await callIn('plan_set', { title: 'R 计划', steps: ['R1', 'R2'] }, execR);
 for (let i = 0; i < 14; i++) await fireIn('read', { file_path: 'r.js' }, execR);
-r = await callIn('plan_status', {}, execR);
+r = await callIn('plan_status', { detail: 'full' }, execR);
 check('(C) 14 次只读只算 7 分（半次），没触发阈值', r.text.includes('已用 7/12'), r.text);
 let usedR = 7;
 for (let i = 0; i < 60; i++) {
   await fireIn('write', { file_path: 'r.txt', content: 'x' }, execR);
 }
-r = await callIn('plan_status', {}, execR);
+r = await callIn('plan_status', { detail: 'full' }, execR);
 check('(C) 两档提醒用尽后明确说出来', r.text.includes('都已用掉'), r.text);
 
 // (D) 两个会话的熔断计数必须独立
@@ -885,13 +888,13 @@ console.log(`\n--- 46. 【泊位 #3 回程票】"我在轨"的表达通道：pla
 const execY = mkExec('D:\\projY');
 await callIn('plan_set', { title: 'Y 计划', steps: ['Y1', 'Y2'] }, execY);
 for (let i = 0; i < 12; i++) await fireIn('write', { file_path: 'y.txt', content: 'x' }, execY);
-let stY = await callIn('plan_status', {}, execY);
+let stY = await callIn('plan_status', { detail: 'full' }, execY);
 check('预算已被填满（模拟合法长活）', /已用 12\/12/.test(stY.text), stY.text);
 r = await callIn('plan_note', { text: '在做语料挖掘：已完成解压与脚本，正在统计词频' }, execY);
 check('在轨声明被接受', !r.refused && r.text.includes('在轨声明已记录'), r.text);
 check('说明清零了多少', r.text.includes('漂移预算已清零'), r.text);
 check('台账区分「自称在轨」与「真的完成」', r.text.includes('自称在轨'), r.text);
-stY = await callIn('plan_status', {}, execY);
+stY = await callIn('plan_status', { detail: 'full' }, execY);
 check('预算确实清零', /已用 0\/12/.test(stY.text), stY.text);
 r = await callIn('plan_log', { limit: 6 }, execY);
 check('台账里出现「在轨声明」这一笔', r.text.includes('在轨声明'), r.text);
@@ -974,7 +977,7 @@ for (let i = 0; i < 6; i++) {
   if (!out.refused) { relay = true; break; }
 }
 check('（熔断负向测试）连续被拒达上限后确实放行（不会把人卡死）', relay, String(relay));
-const stAC = await callIn('plan_status', {}, execAC);
+const stAC = await callIn('plan_status', { detail: 'full' }, execAC);
 check('（熔断负向测试）放行必须在主视图上标记出来（〔⚠ 熔断放行〕）', stAC.text.includes('熔断放行'), stAC.text);
 
 console.log(`\n--- 50. 【缺口修补】纯讨论阶段的长任务：终于动手时补提醒 ---`);
@@ -1126,7 +1129,7 @@ r = await callIn('plan_detour', { text: '给这个项目做一套宣传图', rea
 check('（plan_detour）开出一条额外步骤', !r.refused && r.text.includes('已开一条额外步骤'), r.text.slice(0, 200));
 check('（plan_detour）主线当前步被挂起', r.text.includes('已挂起'), r.text.slice(0, 240));
 check('（plan_detour）明说不计偏离额度', r.text.includes('不计偏离额度'), r.text.slice(0, 260));
-r = await callIn('plan_status', {}, execAO);
+r = await callIn('plan_status', { detail: 'full' }, execAO);
 check('（plan_detour）状态显示：在做额外步骤，主线挂着', r.text.includes('额外步骤'), r.text.slice(0, 200));
 await fireIn('write', { file_path: 'ao.txt', content: 'x' }, execAO);
 r = await callIn('plan_step_done', { evidence: '15 张图做完了' }, execAO);
@@ -1193,12 +1196,12 @@ await callIn('plan_set', { title: 'AR 计划', steps: ['AR1', 'AR2'] }, execAR);
 await callIn('plan_wait', { what: '等外部 API 返回', until: 'API 返回 200', on_timeout: '改用缓存', timeout_turns: 20 }, execAR);
 // 连续 10 次工具调用 —— 预算**必须**纹丝不动（这条就是"说了没做"的锁）
 for (let i = 0; i < 10; i++) await fireIn('write', { file_path: `ar${i}.txt`, content: 'x' }, execAR);
-r = await callIn('plan_status', {}, execAR);
+r = await callIn('plan_status', { detail: 'full' }, execAR);
 check('（缺口一）等待期间连做 10 次写操作，预算仍然是 0', r.text.includes('已用 0/12'), r.text.split('\n').filter((l) => l.includes('预算')).join(''));
 check('（缺口二）plan_status 里能看到等待状态', r.text.includes('在等') && r.text.includes('等外部 API 返回'), r.text.slice(0, 400));
 check('（缺口二）并列出唤醒条件与超时动作', r.text.includes('API 返回 200') && r.text.includes('改用缓存'), r.text.slice(0, 460));
 await callIn('plan_insert', { after_ord: 1, steps: ['AR1.5 后加的'], reason: '测试膨胀' }, execAR);
-r = await callIn('plan_status', {}, execAR);
+r = await callIn('plan_status', { detail: 'full' }, execAR);
 check('（缺口三）plan_status 里能看到计划演进度量', r.text.includes('计划演进') && r.text.includes('膨胀'), r.text.slice(0, 600));
 
 console.log(`\n--- 63. 【紧急闸门】紧急的判定权不在 agent 手上 ---`);
@@ -1215,7 +1218,7 @@ check('（紧急）明说判定权不在 agent 手上', r.text.includes('判定�
 check('（紧急）给出可以直接照抄给用户的问句', r.text.includes('我发现一个紧急问题') && r.text.includes('要现在停下主线去修它吗'), r.text.slice(0, 520));
 check('（紧急）说明受益者不该同时是裁判', r.text.includes('受益者不该同时是裁判'), r.text.slice(0, 700));
 // ③ 未经批准时**不能生效**（计划状态不该变）
-r = await callIn('plan_status', {}, execAS);
+r = await callIn('plan_status', { detail: 'full' }, execAS);
 check('（紧急）未经批准时计划状态没被动过', !r.text.includes('泊位 1 条'), r.text.slice(0, 200));
 // ④ 用户批准后才生效
 r = await callIn('plan_discover', { text: '发现 token 泄露', disposition: 'permit', severity: 'urgent', reason: '泄露的密钥若被扫到会直接造成损失', user_said: '对，先修这个' }, execAS);
@@ -1289,7 +1292,7 @@ r = await callIn('plan_set', { title: '我要插一脚', steps: ['Y1'] }, execAZ
 check('（并行）别的会话也能立自己的计划（不被拦）', !r.refused, r.text.slice(0, 200));
 check('（并行）新计划用的是自己的编号 v1（不是接着别人的版本）', r.text.includes('（v1）'), r.text.slice(0, 200));
 // 关键：A 的计划必须**还在**（没被静默作废）
-const aStill = await callIn('plan_status', {}, execAZ2);   // 查的是 A 那个会话（execAZ2）
+const aStill = await callIn('plan_status', { detail: 'full' }, execAZ2);   // 查的是 A 那个会话（execAZ2）
 check('（并行）A 的计划完好无损（没被静默作废）', aStill.text.includes('别人的计划'), aStill.text.slice(0, 240));
 // 显式取代依然可用
 r = await callIn('plan_set', { title: '明着取代它', steps: ['Z1'], reason: '确认取代', replace: true }, execAZ);
@@ -1298,17 +1301,17 @@ check('（并行）带 replace:true 仍可显式取代', !r.refused, r.text.slic
 console.log(`\n--- 67. 【第 34 步验收】plan_status 能读到提醒统计（据此判断误报率）---`);
 const execBA = mkExec('D:\\projBA');
 await callIn('plan_set', { title: '统计计划', steps: ['B1 一步'] }, execBA);
-r = await callIn('plan_status', {}, execBA);
+r = await callIn('plan_status', { detail: 'full' }, execBA);
 check('（统计）没有提醒时不显示统计行（不啰嗦）', !r.text.includes('提醒统计'), r.text.slice(0, 200));
 // 连做 13 次**写**调用 → 触发"轻提醒"（阈值 12；只读工具只算 0.5，13 次读才 6.5，不够）
 for (let i = 0; i < 13; i++) await fireIn('write', { file_path: `ba${i}.txt`, content: 'x' }, execBA);
-r = await callIn('plan_status', {}, execBA);
+r = await callIn('plan_status', { detail: 'full' }, execBA);
 check('（统计）触发漂移提醒后，统计行出现', r.text.includes('提醒统计'), r.text.slice(-400));
 check('（统计）列出漂移提醒 / 在轨声明 / 关卡拒绝 三项', r.text.includes('漂移提醒') && r.text.includes('在轨声明') && r.text.includes('关卡拒绝'), r.text.slice(-400));
 check('（统计）给出可判断误报的提示', r.text.includes('合法长活') || r.text.includes('真的停摆'), r.text.slice(-400));
 // 在轨声明后，统计里的"在轨声明"计数要涨
 await callIn('plan_note', { text: '我在做这一步的长活' }, execBA);
-r = await callIn('plan_status', {}, execBA);
+r = await callIn('plan_status', { detail: 'full' }, execBA);
 const m = r.text.match(/在轨声明 (\d+) 次/);
 check('（统计）在轨声明计数会涨（可据此算误报率）', m && Number(m[1]) >= 1, r.text.slice(-400));
 
@@ -1318,13 +1321,13 @@ await callIn('plan_set', { title: '补记测试', steps: ['主线第一步'] }, 
 r = await callIn('plan_detour', { text: '一件额外的事', reason: '用户要的' }, execBB);
 const detourId = (() => { const m = r.text.match(/额外步骤 (\d+)/); return m ? Number(m[1]) : 0; })();
 // 先切回主线（模拟"焦点已经不在那条额外步骤上"）
-r = await callIn('plan_status', {}, execBB);
+r = await callIn('plan_status', { detail: 'full' }, execBB);
 const mainId = (() => { const m = r.text.match(/第 1 步\(id=(\d+)\)/); return m ? Number(m[1]) : 0; })();
 r = await callIn('plan_goto', { step_id: mainId, reason: '先回主线' }, execBB);
 check('（补记）能切回主线', !r.refused, r.text.slice(0, 160));
 
 // 关键：切到那条**额外步骤**（原来会被拒："计划步骤 #N 不存在"）
-r = await callIn('plan_status', {}, execBB);
+r = await callIn('plan_status', { detail: 'full' }, execBB);
 const dId = (() => { const m = r.text.match(/额外步骤(\d+)\(id=(\d+)\)/); return m ? Number(m[2]) : 0; })();
 check('（补记）能从步骤表里读到额外步骤的 id', dId > 0, `dId=${dId}`);
 r = await callIn('plan_goto', { step_id: dId, reason: '回去补记那条额外步骤' }, execBB);
@@ -1412,6 +1415,241 @@ const execGB = mkExec('D:\\projGB');
 await callIn('plan_set', { title: '干净旧计划', steps: ['一步'] }, execGB);
 const r71c = await callIn('plan_set', { title: '干净新计划', steps: ['别的'], reason: '换方向' }, execGB);
 check('（配套①）旧计划没有未回应提醒 → 正常换（不误拦）', !r71c.refused, r71c.text.slice(0, 200));
+
+console.log(`\n--- 72. 【真翻车】用户粘贴长文档时，文档里的"先停"不是他的指令 ---`);
+// 2026-09-19 真实误报：用户贴了一份第三方插件 README 全文，正文里有一句
+// 「普通"先停吧"仍应立即遵守」→ RX_INTERRUPT 命中 `先停` → 注入「他在叫你停」 →
+// 差点真的停手，而用户其实只是让我看那份文档、评一评。
+// 根因两条：① 没区分"用户自己说的话"与"他粘贴/引用的文本"；② 没看命中位置。
+const execHA = mkExec('D:\\projHA');
+await callIn('plan_set', { title: 'HA 计划', steps: ['HA1'] }, execHA);
+const say72 = async (text, shouldStop, label) => {
+  await userSays(execHA, text);
+  const out = await fireIn('read', { file_path: 'ha.js' }, execHA);
+  const got = noticeText(out).includes('叫你停');
+  check(label, got === shouldStop, `期望${shouldStop ? '叫停' : '不叫停'}，实际${got ? '叫停' : '不叫停'}`);
+};
+
+const pastedDoc = [
+  '# 某第三方插件 README',
+  '',
+  '## 使用体验',
+  '',
+  '- 暂停与外部等待显式记录；不会自动恢复。普通"先停吧"仍应立即遵守，不依赖插件是否成功记录。',
+  '- 问"现在做到哪里、还有什么没做"时，展示整体计划与未闭合发现。',
+  '',
+  '## 真实边界',
+  '',
+  '程序保证归属、事务、返回路径和事件记录。工作语义仍需 AI/用户申报；没有申报的跑偏无法完整识别。',
+  '',
+  '你看一下这是 codex 制作的，你觉得怎么样呢，和你对比一下',
+].join('\n');
+await say72(pastedDoc, false, '（翻车修复）粘贴的长文档里有「先停吧」「做到哪里」→ 都不算他的话');
+await say72('```\n// 这段在讲 先停 这个词\nconsole.log("先停");\n```', false, '（围栏代码块）块里的「先停」不算用户的话');
+await say72('停一下', true, '（对照）短促真叫停仍然触发');
+await say72('先停一下手上的活，我先问你个事', true, '（对照）短句里的叫停仍然触发');
+await say72('停一下！' + 'x'.repeat(200) + ' 然后再继续', true, '（对照）叫停出现在长消息**开头** → 仍然触发');
+
+console.log(`\n--- 73. 【取长补短·验收闸门】user_said 必须是用户**真说过**的话（插件当证人）---`);
+// 由来：mainline 的验收是「用户明确回复 + 宿主 hook 记录，接口层面不许模型代填批准」。
+// 我们这边的等价物：**插件同时看得见用户消息（pre-step）与 ask_user_question 的回答（post-execute）**，
+// 于是 plan_review 声称"用户说的"必须能在证人池里找到 —— 找不到就是编的。
+const execHB = mkExec('D:\\projHB');
+await callIn('plan_set', { title: 'HB 计划', steps: [{ text: 'HB1', acceptance: 'HB1 完成' }] }, execHB);
+await userSays(execHB, '嗯，这个可以交付了，你去推送吧');   // 用户真说过（但**早于**闸门开启）
+await fireIn('read', { file_path: 'hb.js' }, execHB);
+await callIn('plan_step_done', { evidence: 'HB1 做完了', confirm: true }, execHB);
+
+// ① 编一句用户没说过的话 → 拒
+const r73a = await callIn('plan_review', { confirmed: true, user_said: '对，这个可以发布了' }, execHB);
+check('（闸门）编造的用户原话 → 被拒', r73a.refused, r73a.text.slice(0, 160));
+check('（闸门）说清是"在原话里找不到"', r73a.text.includes('找不到'), r73a.text.slice(0, 160));
+check('（闸门）给出两条出路（照抄 / 等他开口）', r73a.text.includes('照抄') && r73a.text.includes('等用户自己开口'), r73a.text.slice(0, 600));
+
+// ② 用户真说过的话（照抄）→ 放行，并进台账
+const r73b = await callIn('plan_review', { confirmed: true, user_said: '嗯，这个可以交付了' }, execHB);
+check('（闸门）用户真说过 → 放行', !r73b.refused, r73b.text.slice(0, 160));
+const log73 = await callIn('plan_log', { limit: 8 }, execHB);
+check('（闸门）用户原话被写进台账', log73.text.includes('嗯，这个可以交付了'), log73.text.slice(0, 500));
+
+// ③ ask_user_question 的回答**也算**用户原话（它不走用户消息，但走 post-execute）
+const execHC = mkExec('D:\\projHC');
+await callIn('plan_set', { title: 'HC 计划', steps: [{ text: 'HC1', acceptance: 'HC1 完成' }] }, execHC);
+await fireIn('read', { file_path: 'hc.js' }, execHC);
+await callIn('plan_step_done', { evidence: 'HC1 做完了', confirm: true }, execHC);
+for (const h of hooks.get('tools/post-execute') || []) {
+  await h({ agent: execHC.agent, name: 'ask_user_question', arguments: {} }, { answer: '可以，收工吧' }, async () => ({ kind: 'continue' }));
+}
+const r73c = await callIn('plan_review', { confirmed: true, user_said: '可以，收工吧' }, execHC);
+check('（闸门）ask_user_question 的回答也算用户原话 → 放行', !r73c.refused, r73c.text.slice(0, 200));
+
+// ④ 不回归：没提供 user_said 且用户没开口 → 仍走老闸门（"你还没问过用户"）
+const execHD = mkExec('D:\\projHD');
+await callIn('plan_set', { title: 'HD 计划', steps: [{ text: 'HD1', acceptance: 'HD1 完成' }] }, execHD);
+await fireIn('read', { file_path: 'hd.js' }, execHD);
+await callIn('plan_step_done', { evidence: 'HD1 做完了', confirm: true }, execHD);
+const r73d = await callIn('plan_review', { confirmed: true }, execHD);
+check('（不回归）没 user_said + 用户没开口 → 老闸门照旧拦', r73d.refused && r73d.text.includes('没有任何用户发言'), r73d.text.slice(0, 200));
+
+console.log(`\n--- 74. 【泊位 #17】原话池改挂 plan 状态：换会话仍认，而且真落盘 ---`);
+// 旧实现的两个真实缺陷：sessionKeyOf 是**进程内**自增号（重启全变）、且同一个计划换个会话
+// agent 对象就换了 key → 用户明明说过，闸门却判成"模型编的"（假阴性）。
+const execKA = mkExec('D:\\projKA');
+await callIn('plan_set', { title: 'KA 计划', steps: [{ text: 'KA1', acceptance: 'KA1 完成' }] }, execKA);
+await userSays(execKA, '行，这样就可以了');
+await fireIn('read', { file_path: 'ka.js' }, execKA);
+await callIn('plan_step_done', { evidence: 'KA1 做完了', confirm: true }, execKA);
+
+// 换一个 agent 对象 = 另一个会话（sessionKey 必然不同）；同一工作目录 → 同一条计划
+const execKB = mkExec('D:\\projKA');
+const r74b = await callIn('plan_review', { confirmed: false, user_said: '这句用户没说过' }, execKB);
+check('（不回归）编的话仍被拒', r74b.refused && r74b.text.includes('找不到'), r74b.text.slice(0, 200));
+
+const r74a = await callIn('plan_review', { confirmed: true, user_said: '行，这样就可以了' }, execKB);
+check('（跨会话）会话 A 说过的话，换个会话仍认（旧实现会误判成"编的"）', !r74a.refused, r74a.text.slice(0, 220));
+
+// 硬证据：原话真的写在 SQLite 里 —— 这是"跨重启也查得到"的结构保证（不再依赖任何内存）
+const { DatabaseSync } = await import('node:sqlite');
+const db74 = new DatabaseSync(TESTDB);
+const rows74 = db74.prepare("SELECT plan_id, value FROM plan_state WHERE key = 'user_voice'").all();
+db74.close();
+const hit74 = rows74.some((r) => String(r.value).includes('行，这样就可以了'));
+check('（落盘）原话写在 plan_state 表里、且按计划分开存', hit74, JSON.stringify(rows74.map((r) => String(r.value).slice(0, 70))));
+
+console.log(`\n--- 75. 【B】备份 / 导出：VACUUM INTO 一致快照 + 当场自检 ---`);
+// 为什么要这么写：库跑在 WAL 模式下，直接复制 .db/-wal/-shm 三件套是**不自洽**的
+// （可能缺最近事务甚至撕裂）—— 隔壁 mainline 的文档专门点名过这个坑。
+const { readdirSync, readFileSync } = await import('node:fs');
+const execLA = mkExec('D:\\projLA');
+await callIn('plan_set', { title: 'LA 计划', steps: [{ text: 'LA1', acceptance: 'LA1 完成' }] }, execLA);
+await userSays(execLA, '这条原话要能被导出来');
+await fireIn('read', { file_path: 'la.js' }, execLA);
+await callIn('plan_step_done', { evidence: 'LA1 做完', confirm: true }, execLA);
+
+// 备份目录**隔离**在临时目录里（测试库本来就在 tmpdir，绝不动用户的真实库）
+const backupDir = join(TMP, 'backups');
+const r75 = await callIn('plan_backup', { dir: backupDir }, execLA);
+check('（备份）生成成功并当场自检通过', !r75.refused && r75.text.includes('已当场验过'), r75.text.slice(0, 300));
+check('（备份）报告里写明了 integrity_check 结果', r75.text.includes('integrity_check') && r75.text.includes('ok'), r75.text.slice(0, 400));
+
+const files75 = readdirSync(backupDir).filter((f) => f.endsWith('.db'));
+check('（备份）备份文件真的落在隔离目录里', files75.length === 1, JSON.stringify(files75));
+
+// **独立复验**：不信它自己的报告，自己开一次备份、跑一次完整性检查
+let ic75 = '', has75 = false;
+if (files75.length === 1) {
+  const bk = new DatabaseSync(join(backupDir, files75[0]), { readOnly: true });
+  const ic = bk.prepare('PRAGMA integrity_check').get();
+  ic75 = String(Object.values(ic)[0]);
+  has75 = !!bk.prepare("SELECT title FROM plans WHERE title = 'LA 计划'").get();
+  bk.close();
+}
+check('（备份）独立复验：integrity_check = ok', ic75.toLowerCase() === 'ok', ic75);
+check('（备份）独立复验：备份里确实有那条计划', has75, String(has75));
+
+const r75b = await callIn('plan_export', { dir: backupDir }, execLA);
+check('（导出）导出成功', !r75b.refused && r75b.text.includes('导出完成'), r75b.text.slice(0, 260));
+const md75 = readdirSync(backupDir).find((f) => f.endsWith('.md'));
+const mdText = md75 ? readFileSync(join(backupDir, md75), 'utf8') : '';
+check('（导出）md 里含标题、验收、台账三样', mdText.includes('LA 计划') && mdText.includes('验收') && mdText.includes('## 台账'), mdText.slice(0, 220));
+
+// 【2026-09-20 真机教训】上面两次调用都传了 `dir`（本意是隔离）——
+// 那恰好把「默认路径」这条分支整个绕过去了，于是真机上第一次调用就走这条分支、
+// 直接 `config is not defined` 崩掉，而测试全绿。
+// 所以必须**不传参数**再跑一次：让它自己去算默认目录（测试库在 tmpdir，默认值天然隔离）。
+const r75c = await callIn('plan_backup', {}, execLA);
+check('（默认分支）不传 dir 也能成功 —— 真机崩的就是这条分支', !r75c.refused && r75c.text.includes('已当场验过'), r75c.text.slice(0, 300));
+check('（默认分支）默认落在「库文件旁边的 backups/」', r75c.text.includes(join(TMP, 'backups')), r75c.text.slice(0, 300));
+const r75d = await callIn('plan_export', {}, execLA);
+check('（默认分支）导出不传 dir 也能成功', !r75d.refused && r75d.text.includes('导出完成'), r75d.text.slice(0, 260));
+
+console.log(`\n--- 77. 【额外步骤 1】泊位按项目可见：计划被归档后，它的欠账不能就此消失 ---`);
+// 实测踩到的真 bug：计划被 plan_review 归档成 done 之后，activePlan 返回 null、plan_set 时 prev 也为空，
+// 它上面未闭合的泊位就再也没人管了 —— plan_park 显示"泊位空"、plan_close 报"不属于当前计划"。
+const execNA = mkExec('D:\\projNA');
+await callIn('plan_set', { title: 'NA 老计划', steps: ['NA1'] }, execNA);
+await fireIn('read', { file_path: 'na.js' }, execNA);
+await callIn('plan_discover', { text: '欠账：X 那块要补', disposition: 'defer', resume_when: '下次动 X 那块时' }, execNA);
+await callIn('plan_step_done', { evidence: 'NA1 完成', confirm: true }, execNA);
+await userSays(execNA, '行，收工');
+await callIn('plan_review', { confirmed: true, user_said: '行，收工' }, execNA);   // → 归档 done
+
+await callIn('plan_set', { title: 'NA 新计划', steps: ['NA2'] }, execNA);          // 同一工作目录 → 同一条项目
+
+const r77a = await callIn('plan_park', {}, execNA);
+check('（跨计划）已归档计划上的欠账仍然看得见', r77a.text.includes('X 那块要补'), r77a.text.slice(0, 420));
+check('（跨计划）明确标注它挂在哪条计划上', r77a.text.includes('挂在《NA 老计划》上'), r77a.text.slice(0, 420));
+
+// 关得掉：跨计划按 id 是通的（id 是全局主键，只要求同项目）
+const { DatabaseSync: DB77 } = await import('node:sqlite');
+const db77 = new DB77(TESTDB);
+const row77 = db77.prepare("SELECT id FROM parking WHERE text LIKE '%X 那块要补%'").get();
+db77.close();
+check('（跨计划）能取到那条泊位的 id', !!row77, String(row77 && row77.id));
+const r77b = await callIn('plan_close', { park_id: row77.id, reason: '研究完了，判定不做', outcome: 'declined' }, execNA);
+check('（跨计划）关得掉归档计划上的欠账', !r77b.refused, r77b.text.slice(0, 300));
+const r77c = await callIn('plan_park', {}, execNA);
+check('（跨计划）关掉之后它从列表里消失', !r77c.text.includes('X 那块要补'), r77c.text.slice(0, 300));
+
+console.log(`\n--- 78. 【残留修复】锚里的泊位数必须与 plan_park 同口径（否则自相矛盾）---`);
+// 原来的毛病：plan_park 已改成按项目数，但锚/回执还在按**当前计划**数 → 用户先看到"泊位空"，
+// 再打开清单发现还有几条，只会觉得这工具在骗人。
+const execZZ78 = mkExec('D:\\projZZ78');
+await callIn('plan_set', { title: 'ZZ 老计划', steps: ['ZZ1'] }, execZZ78);
+await fireIn('read', { file_path: 'zz.js' }, execZZ78);
+await callIn('plan_discover', { text: '欠账：ZZ 那块要补', disposition: 'defer', resume_when: '下次动 ZZ 时' }, execZZ78);
+await callIn('plan_step_done', { evidence: 'ZZ1 完成', confirm: true }, execZZ78);
+await userSays(execZZ78, '收工');
+await callIn('plan_review', { confirmed: true, user_said: '收工' }, execZZ78);   // 归档成 done
+await callIn('plan_set', { title: 'ZZ 新计划', steps: ['ZZ2'] }, execZZ78);      // 同一项目，新计划
+
+await userSays(execZZ78, '继续');                                               // 新回合 → 锚会重放
+const inj78 = await fireIn('read', { file_path: 'zz2.js' }, execZZ78);
+const anchor78 = noticeText(inj78);
+check('（锚）不再说"泊位空"', !anchor78.includes('泊位空'), anchor78.slice(0, 320));
+check('（锚）数字是 1，与 plan_park 同口径', /泊位\s*1/.test(anchor78), anchor78.slice(0, 320));
+const park78 = await callIn('plan_park', {}, execZZ78);
+check('（一致）plan_park 也报 1 条待处理', park78.text.includes('1 条待处理'), park78.text.slice(0, 220));
+
+console.log(`\n--- 79. 【一次性五改】降噪 · 不丢 · 主动整理 ---`);
+// ① C 出口 + ④ B 收口：换计划时，未完成的旧步骤自动入泊、用户原话池跟着搬
+const execZ9 = mkExec('D:\\projZ9');
+await callIn('plan_set', { title: 'Z9 老计划', steps: ['Z9-1', 'Z9-2', 'Z9-3'] }, execZ9);
+await userSays(execZ9, '这条原话要在换计划后仍然算数');
+await fireIn('read', { file_path: 'z9.js' }, execZ9);
+await callIn('plan_step_done', { evidence: 'Z9-1 完成', confirm: true }, execZ9);   // 做完 1 件，剩 2 件
+
+const rz9 = await callIn('plan_set', { title: 'Z9 新计划', steps: ['Z9-A'], reason: '整条线重估：原假设不成立' }, execZ9);
+check('（C 出口）回执告知"上一版没做完的已自动入泊"', rz9.text.includes('没做完') && rz9.text.includes('自动入泊'), rz9.text.slice(0, 420));
+const parkZ9 = await callIn('plan_park', {}, execZ9);
+check('（C 出口）未完成的旧步骤真的进了泊位清单', parkZ9.text.includes('上一版计划没做完'), parkZ9.text.slice(0, 420));
+
+await fireIn('read', { file_path: 'z9b.js' }, execZ9);
+await callIn('plan_step_done', { evidence: 'Z9-A 完成', confirm: true }, execZ9);
+const rz9b = await callIn('plan_review', { confirmed: false, user_said: '这条原话要在换计划后仍然算数' }, execZ9);
+check('（B 收口）换计划后，旧计划期间的用户原话仍算数（不判成"编的"）', !rz9b.text.includes('找不到'), rz9b.text.slice(0, 300));
+
+// ② A 降噪：额外步骤期间阈值翻倍 —— 14 次调用不该被催（原阈值 12 早就该催了）
+const execW9 = mkExec('D:\\projW9');
+await callIn('plan_set', { title: 'W9 计划', steps: ['W9-1'] }, execW9);
+await fireIn('read', { file_path: 'w9.js' }, execW9);
+await callIn('plan_detour', { text: '做用户另外要的活', acceptance: '做完' }, execW9);
+for (let i = 0; i < 13; i++) await fireIn('read', { file_path: `w9-${i}.js` }, execW9);
+const injW9 = noticeText(await fireIn('read', { file_path: 'w9-last.js' }, execW9));
+check('（A 降噪）额外步骤期间 14 次调用不催（阈值翻倍生效）', !injW9.includes('没有推进') && !injW9.includes('挂起中'), injW9.slice(0, 300));
+
+// ③ D 主动：计划改过 5 次后，锚主动递一次整理稿
+const execV9 = mkExec('D:\\projV9');
+await callIn('plan_set', { title: 'V9 计划', steps: ['V9-1', 'V9-2', 'V9-3'] }, execV9);
+let insOk = 0;
+for (let i = 0; i < 5; i++) {
+  const ri = await callIn('plan_insert', { after_ord: 1, steps: [`插入的活 ${i}`], reason: 'D 主动测试：制造多次计划变更' }, execV9);
+  if (!ri.refused) insOk++;
+}
+check('（D 主动）5 次插入都成功了', insOk === 5, `成功 ${insOk}/5`);
+await userSays(execV9, '继续');
+const injV9 = noticeText(await fireIn('read', { file_path: 'v9.js' }, execV9));
+check('（D 主动）改过 5 次后，锚里主动递整理稿', injV9.includes('整理稿'), injV9.slice(0, 460));
 
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -19,8 +19,8 @@
 //   → 凡能用代码强制的不变量，绝不退化成提示词要求。见文件末尾不变量表。
 import z from "@deepseek-ai/schemastery";
 import { defineTool } from "@deepseek-ai/dsh-tools";
-import { mkdirSync, realpathSync } from "node:fs";
-import { dirname } from "node:path";
+import { mkdirSync, existsSync, statSync, writeFileSync, realpathSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 
@@ -31,8 +31,14 @@ const inject = ["tools"];
 const STEP_STATUSES = ["pending", "active", "done", "skipped", "blocked"];
 /** 泊位条目的状态域。parked = 仍在泊位；其余为已关闭（两个正当终态：done 做了 / declined 判定不做）。 */
 const PARK_STATUSES = ["parked", "escalated", "done", "declined"];
-/** 会被漂移预算计数的"计划进展"类工具——只有它们能把预算清零。 */
-const PROGRESS_TOOLS = new Set(["plan_step_done", "plan_set", "plan_goto"]);
+/**
+ * 会被漂移预算计数的"计划进展"类工具——只有它们能把预算清零。
+ * 【2026-09-20 A 降噪】加入 `plan_detour`：开一条额外步骤本身就是**记账动作**
+ * （"我现在要去做用户另外要的事"），它当然算进展。
+ * 实测：30 次漂移提醒里有 **10 次**（33%）在催"额外步骤"—— 那正是用户另外要的活，
+ * 却被当成"没推进主线"。这是噪声最大的一处。
+ */
+const PROGRESS_TOOLS = new Set(["plan_step_done", "plan_set", "plan_goto", "plan_detour"]);
 /** 完全不参与预算计数的工具（查询类不推进也不消耗）。 */
 const NEUTRAL_PREFIX = "plan_";
 /** 偏离步骤在排序上的偏移量：detour 永远排在计划步骤之后，不扰动计划顺序。 */
@@ -53,8 +59,108 @@ const Config = z.object({
 // ---------- 存储 ----------
 
 let db = null;
+/**
+ * 【2026-09-20 真机教训】备份/导出要知道库文件在哪，但 `config` 是 `apply(ctx, config)` 的
+ * **局部参数**，模块顶层根本看不到它 —— 第一版我直接在 `backupsDir()` 里写 `config.path`，
+ * 结果**测试全绿、真机一调就 `config is not defined`**。
+ * 为什么测试没抓到：两条用例都传了 `dir`（本意是隔离到临时目录），
+ * **恰好把"默认路径"这条分支整个绕过去了**。
+ * → 纪律：为了隔离而传参数，等于放弃默认分支的覆盖 —— 要么补一条不传参数的用例，
+ *   要么让默认值本身就落在隔离位置。这里下面两条都做。
+ */
+let dbPath = "";
+/**
+ * 【#4 · 2026-09-26】库结构版本 —— 代码认得的最高版本。
+ * 改结构（加列 / 改语义）时**必须**在这里 +1，并在 MIGRATIONS 里补一条。
+ *
+ * 为什么要它（Beads 的教训）：插件本来靠 addCol「缺列就加」自愈，
+ * 那能处理「代码比库新」，但**处理不了「库比代码新」** ——
+ * 那种情况下旧代码会按旧语义读新数据，**静默出错**（正是本项目最想消灭的失败模式）。
+ */
+const SCHEMA_VERSION = 1;
+
+/** 前向迁移表：[目标版本, 说明, 执行体]。按序执行 to > 当前版本 的条目。v1 是纯标记。 */
+const MIGRATIONS = [
+	[1, "启用 schema 版本闸门（纯标记，无结构变化）", () => {}],
+];
+
+/**
+ * 库结构版本校验：相等就过、库领先就拦、代码领先就迁移。
+ * 逃生阀（照 Beads）：config.ignoreSchemaSkew === true，或环境变量
+ * DSH_PLAN_ANCHOR_IGNORE_SCHEMA_SKEW=1 —— **豁免也要打警告，绝不静默**。
+ */
+function ensureSchemaVersion(d, config) {
+	const readVer = () => Number((d.prepare("PRAGMA user_version").get() || {}).user_version) || 0;
+	const cur = readVer();
+	if (cur === SCHEMA_VERSION) return cur;
+	const ignore = (config && config.ignoreSchemaSkew === true)
+		|| process.env.DSH_PLAN_ANCHOR_IGNORE_SCHEMA_SKEW === "1";
+	if (cur > SCHEMA_VERSION) {
+		const msg = [
+			`plan-anchor：库结构版本不匹配 —— 数据库是 v${cur}，本代码只认到 v${SCHEMA_VERSION}（库领先 ${cur - SCHEMA_VERSION} 版）。`,
+			"",
+			"含义：这个 plan.db 被**更新的** plan-anchor 迁移过。用旧代码读写它，",
+			"可能查不到列、或把新数据按旧语义解释（静默出错）—— 所以这里宁可停下来说清楚。",
+			"",
+			"三种处理：",
+			"  1) 更新插件（推荐）：把 dsh-plan-anchor 升到与库匹配的版本，再启动；",
+			"  2) 确知新迁移是纯追加、且愿意担风险：配置里加 ignoreSchemaSkew: true，",
+			"     或设环境变量 DSH_PLAN_ANCHOR_IGNORE_SCHEMA_SKEW=1（会打警告，不静默）；",
+			"  3) 先备份再排查：plan_backup 会做 VACUUM INTO + integrity_check。",
+		].join("\n");
+		if (ignore) {
+			console.error("[plan-anchor] ⚠ " + msg.split("\n").join("\n[plan-anchor] ⚠ ") + "\n[plan-anchor] ⚠ 已按显式豁免继续运行（风险自负）");
+			return cur;
+		}
+		throw new Error(msg);
+	}
+	// 代码领先 → 前向迁移
+	for (const [to, note, run] of MIGRATIONS) {
+		if (to <= cur || to > SCHEMA_VERSION) continue;
+		try {
+			run(d);
+		} catch (e) {
+			throw new Error(`plan-anchor：迁移到 v${to}（${note}）失败：${e && e.message ? e.message : e}`);
+		}
+		d.exec(`PRAGMA user_version = ${to}`);
+	}
+	if (readVer() !== SCHEMA_VERSION) d.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+	return SCHEMA_VERSION;
+}
+
+/**
+ * 【#5 · 2026-09-26】工具集分层 —— 按 toolTier 只挂需要的工具。
+ *
+ * 依据（调研结论）：Taskmaster 实测 36 个 MCP 工具 ≈ **21,000 token**，切成 core 7 个后 ≈ 5,000
+ * （省 70%）——而且这笔开销是**每次请求**都要付的（schema 随请求走）。
+ * 我们此前是 25 个 plan_* 工具全挂，没有档位。
+ *
+ * 分档原则：按**真实使用频次**（全库 44,159 次工具调用的统计）切，而不是按功能分类切：
+ *   core     = 日常六件事（立/看/完成/发现/偏离/在轨）+ 泊位两条 + 改一步 + 换焦点 + 认领
+ *   standard = 进阶编辑与节奏控制（插入/丢弃/返工/静音/等待/验收）
+ *   all      = 维护与汇报（问用户/备份/导出/聚合/衰减/体检/台账/整理稿）——低频，但要的时候得有
+ */
+const TOOL_TIER_RANK = { core: 0, standard: 1, all: 2 };
+const TOOL_TIERS = {
+	plan_set: "core", plan_status: "core", plan_step_done: "core", plan_discover: "core",
+	plan_detour: "core", plan_note: "core", plan_park: "core", plan_close: "core",
+	plan_amend: "core", plan_goto: "core", plan_claim: "core",
+	plan_insert: "standard", plan_drop: "standard", plan_rework: "standard",
+	plan_mute: "standard", plan_wait: "standard", plan_review: "standard",
+	plan_ask: "all", plan_backup: "all", plan_export: "all", plan_compact: "all",
+	plan_gc: "all", plan_health: "all", plan_log: "all", plan_report: "all",
+};
+let toolTier = "all";
+
+/** 当前档位下这个工具该不该挂（没登记的工具按 all 处理 —— 宁可多挂，也不静默少挂） */
+function tierAllows(name) {
+	const need = TOOL_TIERS[name] || "all";
+	return TOOL_TIER_RANK[toolTier] >= TOOL_TIER_RANK[need];
+}
+
 function open(config) {
 	if (!db) {
+		dbPath = String(config.path);
 		mkdirSync(dirname(config.path), { recursive: true });
 		db = new DatabaseSync(config.path);
 		db.exec("PRAGMA journal_mode = WAL");
@@ -175,6 +281,9 @@ function open(config) {
 			db.exec("DELETE FROM runtime");
 		}
 	}
+
+		// 【#4】库结构闸门：库领先 → 带可操作信息停下；代码领先 → 走迁移表（见 ensureSchemaVersion）
+		ensureSchemaVersion(db, config);
 	return db;
 }
 
@@ -230,12 +339,30 @@ function stDel(d, planId, key) {
 /** 自动写台账：状态迁移的留痕由代码产生，不接受 agent 手工填写。 */
 function log(d, kind, { planId = 0, stepId = 0, ref = "", detail = "", session = "" } = {}) {
 	d.prepare("INSERT INTO ledger (ts, kind, plan_id, step_id, ref, detail, session) VALUES (?,?,?,?,?,?,?)")
-		.run(now(), kind, planId, stepId, ref, detail, String(session));
+		.run(now(), kind, planId, stepId, ref, detail, CURRENT_SESSION_ID || String(session));   // 【稳定身份】优先写跨重启不变的 id
 }
 /** 会话标识：同一个 agent 对象复用同一个短号（进程内稳定，不依赖宿主给字段）。 */
+/**
+ * 【稳定会话身份 · 2026-09-27】agent.session.header.id —— DSH 的会话 id，**跨重启不变**。
+ *
+ * 为什么需要它（真机验收抓到的缺陷）：
+ *   sessionKeyOf 是**进程内**自增号（WeakMap），DSH 一重启就重编号。实测后果 ——
+ *   重启后新会话拿到的新号与上一进程写进台账的老号**撞车**，于是"最近动它的是不是我自己"判错，
+ *   E v3 的"正在别处做"分支从不触发（数据库铁证：fresh_live_notified 不存在，
+ *   fresh_asked_keys=["s2","s1"]，fresh_light_n=7）。
+ *
+ * 取不到（老宿主 / 非 agent 调用）就返回空串，调用方**退回老行为**，不改变原语义。
+ */
+function stableIdOf(agent) {
+	const h = agent && agent.session && agent.session.header;
+	const id = h && (h.id || h.sessionId);
+	return typeof id === "string" && id ? id : "";
+}
+
 const agentKeys = new WeakMap();
 let agentSeq = 0;
 function sessionKeyOf(agent) {
+	{ const _sid = stableIdOf(agent); if (_sid) CURRENT_SESSION_ID = _sid; }   // 【稳定身份】顺手记下
 	if (!agent || typeof agent !== "object") return "";
 	if (!agentKeys.has(agent)) agentKeys.set(agent, `s${++agentSeq}`);
 	return agentKeys.get(agent);
@@ -448,6 +575,19 @@ function resolvePark(d, plan, args, idKey = "park_id", ordKey = "park_ord") {
 	if (id) {
 		const p = d.prepare("SELECT * FROM parking WHERE id=?").get(id);
 		if (p && p.plan_id === plan.id) return { park: p, how: "id" };
+		// 【2026-09-20 修复】跨计划引用：泊位可能还挂在**已归档**的旧计划上（换计划时若旧计划
+		// 已被 plan_review 归档，它的未闭合泊位不会被搬过来）。泊位 id 是全局主键，按 id 找是安全的；
+		// 只要求**同一个项目（scope）**内 —— 免得误伤别的项目的欠账。
+		if (p) {
+			const owner = d.prepare("SELECT id, title, scope FROM plans WHERE id=?").get(p.plan_id);
+			if (owner && owner.scope === plan.scope) {
+				return {
+					park: p,
+					how: "id-cross-plan",
+					note: `ℹ 泊位 #${p.id} 挂在《${owner.title}》上（不在当前计划里）—— 仍然按它处理。`
+				};
+			}
+		}
 		// 兜底：id 查不到 → 试试它是不是"泊位 N"里的序号
 		const byOrdP = parkingByOrd(d, plan.id, id);
 		if (byOrdP) {
@@ -494,6 +634,60 @@ const REF_PAIRS = [
  */
 let CURRENT_SESSION = "";
 
+// 【稳定身份 · 2026-09-27】最近一次见过的会话稳定 id（空串 = 取不到 → 各处退回老行为）
+let CURRENT_SESSION_ID = "";
+// 【E · 2026-09-25】新会话碰到"别人的计划"时的策略：
+//   ask（默认）= 先问一句"要不要接着做"，问过之后每 FRESH_LIGHT_EVERY 步最多轻提一次
+//   inherit     = 旧行为（默默接手，护栏继续生效）
+//   ignore      = 完全不理（锚不注入，直到本会话显式 plan_claim）
+let freshSessionPolicy = "ask";
+// 【E v3】"正在别处做"的活跃窗口（默认 1 小时，用户 2026-09-26 定）；可用 liveWindowMinutes 覆盖
+let liveWindowMs = 60 * 60 * 1000;
+// 【#6】首问措辞档：directive（命令式，默认）| neutral（中性+事实，做 A/B 用）
+let freshAskStyle = "directive";
+const FRESH_LIGHT_EVERY = 20;
+const FRESH_KEYS_KEEP = 30;   // 每条计划最多记 30 个会话号（够用且不涨库）
+
+/** 取「挂在计划状态上」的会话记号表 —— 不能用 sessionKey 当持久键（进程内自增，重启就变）。 */
+function freshKeyList(d, planId, key) {
+	try {
+		const a = JSON.parse(stGet(d, planId, key, "[]") || "[]");
+		return Array.isArray(a) ? a : [];
+	} catch { return []; }
+}
+/**
+ * 【E v3 · 2026-09-26】"这条计划是不是正在别的会话里做？"（用户指出的状态缺口）
+ * 判据：ledger 里最近一条**带 session** 的记录，在 liveWindowMs 之内、且不是本会话写的。
+ * 为什么跳过没 session 的行：大量记账事件（提醒/判决）本来就不带会话归属，
+ * 拿它们当"最后活动"会把"有没有人在做"判断偏。
+ * 返回 null（= 遗留/没人在动/就是我自己在动）或 {mins, who}。
+ */
+function liveElsewhere(d, planId) {
+	try {
+		const rows = d.prepare("SELECT ts, session FROM ledger WHERE plan_id=? ORDER BY id DESC LIMIT 40").all(planId);
+		const r = rows.find((x) => x.session && x.session !== "");
+		if (!r) return null;
+		// 【稳定身份 · 2026-09-27】"是不是我"必须按稳定身份判：
+		//   · 稳定身份行（session-…）→ 与我的稳定身份严格相等才算我；
+		//   · 老格式号（s1/s2）→ **一律不算我** —— 跨进程撞车正出在这里，而且老行本来也认不出是谁；
+		//   · 运行时拿不到稳定身份 → 退回老行为（按当前号比），不改变原语义。
+		const _stableRow = /^session-/.test(String(r.session));
+		const _mine = _stableRow ? r.session === CURRENT_SESSION_ID : (CURRENT_SESSION_ID ? false : r.session === CURRENT_SESSION);
+		if (_mine) return null;   // 是我自己在动 → 不算别人
+		const age = Date.now() - Number(r.ts);
+		if (!(age >= 0 && age <= liveWindowMs)) return null;
+		return { mins: Math.max(1, Math.round(age / 60000)), who: r.session };
+	} catch { return null; }
+}
+
+function freshKeyAdd(d, planId, key, v) {
+	if (!planId || !v) return;
+	const a = freshKeyList(d, planId, key).filter((k) => k !== v);
+	a.push(v);
+	while (a.length > FRESH_KEYS_KEEP) a.shift();
+	try { stSet(d, planId, key, JSON.stringify(a)); } catch { /* 记不上也不能打断主流程 */ }
+}
+
 function withRefs(d, args, scope, fn, session = "") {
 	let a = args || {};
 	const notes = [];
@@ -523,6 +717,8 @@ function withRefs(d, args, scope, fn, session = "") {
 	// 【别丢 session】原来只传三个参数 → 直接传函数名时 session 会丢（plan_claim 就栽在这）。
 	// 补上第四个参数；用闭包的老写法不受影响（它们忽略多余参数）。
 	const out = fn(d, a, scope, session);
+	// 【E】本会话与这条计划"打过照面"（建 / 认领 / 查询都算）→ 记名，之后正常注入锚、不再问"要不要接着做"
+	try { const _p2 = activePlan(d, scope); if (_p2) freshKeyAdd(d, _p2.id, "fresh_engaged_keys", CURRENT_SESSION); } catch { /* 记名失败不打断主流程 */ }
 	CURRENT_SESSION = _prevSession;      // 还原
 	if (notes.length && out && typeof out === "object" && typeof out.briefing === "string") {
 		return { ...out, briefing: out.briefing + "\n" + notes.join("\n") };
@@ -532,6 +728,34 @@ function withRefs(d, args, scope, fn, session = "") {
 
 function openParking(d, planId) {
 	return d.prepare("SELECT * FROM parking WHERE plan_id = ? AND status = 'parked' ORDER BY id ASC").all(planId);
+}
+
+/**
+ * 按**项目（scope）**取出所有未闭合泊位，跨计划。
+ * 【2026-09-20 真 bug 修复】原来的 openParking 只按 plan_id 查，于是：
+ * 计划被 `plan_review` 正常归档（status=done）之后，`activePlan` 返回 null、换计划时 `prev` 也为空，
+ * 它上面未闭合的泊位就**再也没人管了** —— plan_park 显示"泊位空"、plan_close 报"不属于当前计划"。
+ * 实测：三条泊位（id 10/11/12）滞留在大已完成的计划上，用户要关都关不掉，直接违反"泊位不会丢"的承诺。
+ * 修法不是"搬迁"（搬迁依赖 prev/owner，而 owner 是**进程内**会话号、重启就变，照样不可靠），
+ * 而是**按项目查**：泊位挂在它诞生的计划上（历史清楚），但**只要还在这个项目里，就看得见、动得了。**
+ */
+function openParkingByScope(d, scope) {
+	return d.prepare(`
+		SELECT p.*, pl.title AS plan_title, pl.status AS plan_status
+		FROM parking p JOIN plans pl ON pl.id = p.plan_id
+		WHERE pl.scope = ? AND p.status IN ('parked','escalated')
+		ORDER BY p.id ASC
+	`).all(scope);
+}
+
+/**
+ * 面向用户的「还有多少欠账」：按**项目**数，与 `plan_park` 同一口径。
+ * 【2026-09-20 残留修复】原来各处都写 `openParking(d, plan.id)`，于是计划一归档，
+ * 锚和回执就报"泊位空"，而 `plan_park` 里明明还躺着几条 —— **同一个数在两处对不上**，
+ * 用户先看到"泊位空"、再打开清单发现 3 条，只会觉得这工具在骗人。
+ */
+function openParkingCount(d, plan) {
+	return plan ? openParkingByScope(d, plan.scope).length : 0;
 }
 /**
  * 「回程票到期」的泊位：它指的是**某一步**（按 step id，不按序号——序号会顺延），那一步做完了就该回来处理。
@@ -816,7 +1040,13 @@ function integrityLine(d) {
 	// 全库检查（不限本计划）：任何合法路径都不会**删除**泊位行——
 	// 关闭只是改 status，重规划只是改 plan_id，偏离结束只是改 status。
 	// 所以"台账有、表里没有"只可能是被绕开工具直接动过。
-	const refs = d.prepare("SELECT ref FROM ledger WHERE kind IN ('discover_park','discover_block')").all()
+	//
+	// 【2026-09-20 覆盖漏洞修复】原来只查 discover_park / discover_block 两种事件 ——
+	// 于是"换计划时自动入泊"（park_carryover）留下的泊位**不受这条自检保护**：
+	// 删掉它，台账明明记着，却报不出异常（实测被测试 28 当场抓到）。
+	// 注意 park_carryover 的 ref 有两种形态：搬迁计数写「3 条」、单条入泊写「#12」——
+	// 下面的解析把非数字过滤掉，所以两种都能安全混进来。
+	const refs = d.prepare("SELECT ref FROM ledger WHERE kind IN ('discover_park','discover_block','park_carryover')").all()
 		.map((r) => Number(String(r.ref).replace("#", "")))
 		.filter((n) => Number.isInteger(n) && n > 0);
 	if (!refs.length) return null;
@@ -832,6 +1062,9 @@ function integrityLine(d) {
  * 也是漂移提醒注入的内容。要求：短、具体、带编号、带明确下一步。
  */
 function anchorText(d, plan, opts = {}) {
+// 【C · 2026-09-25】默认给短版：锚的职责是"把计划放回眼前"，不是"把计划全文搬一遍"。
+// 要全文（只有 plan_status detail:"full" 需要）→ 显式传 { brief: false }。
+const brief = opts.brief !== false;
 	if (!plan) {
 		return [
 			"【计划锚】当前没有生效的计划。",
@@ -843,7 +1076,7 @@ function anchorText(d, plan, opts = {}) {
 	const steps = planSteps(d, plan.id);
 	const cur = currentStep(d, plan.id);
 	const done = steps.filter((s) => s.status === "done").length;
-	const park = openParking(d, plan.id);
+	const park = openParkingByScope(d, plan.scope);
 	const dts = lineageDetours(d, plan); // 额外步骤按**谱系**统计：改计划不该让编号重启
 	const dtDone = dts.filter((s) => s.status === "done").length;
 	const lines = [];
@@ -852,29 +1085,32 @@ function anchorText(d, plan, opts = {}) {
 	lines.push(`【计划锚】${plan.title}（v${plan.version}）｜${progressText(done, steps.length)}${dtPart}`);
 	// 编号刚变过就必须主动说 —— 否则"我们做到哪了"跨修订又会含混
 	const rev = revisionNote(d, plan.id);
-	if (rev) lines.push(`⚠ 计划刚修订过：${rev}`);
+	if (rev) lines.push(`⚠ 计划刚修订过：${brief ? String(rev).slice(0, 100) : rev}`);
 
 	if (cur && cur.kind === "detour") {
 		const resume = stGet(d, plan.id, "resume_step");
 		const r = resume ? stepById(d, Number(resume)) : null;
-		lines.push(`⚙ 当前在做**额外步骤 ${cur.detour_no}**：${cur.text}`);
+		lines.push(brief ? `⚙ 在做**额外步骤 ${cur.detour_no}**：${cueShort(cur, 60)}` : `⚙ 当前在做**额外步骤 ${cur.detour_no}**：${cur.text}`);
 		lines.push(r
-			? `主线${stepLabel(r)}「${r.text}」已挂起 —— 做完 plan_step_done 会**自动回到主线${stepLabel(r)}**。`
+			? (brief
+				? `主线${stepLabel(r)}「${cueShort(r, 40)}」已挂起 —— 做完会自动回到主线。`
+				: `主线${stepLabel(r)}「${r.text}」已挂起 —— 做完 plan_step_done 会**自动回到主线${stepLabel(r)}**。`)
 			: "主线当前没有挂起的步骤；做完 plan_step_done 会回到主线的下一个待办步。");
 	} else if (cur) {
-		lines.push(`▶ 要做：**${cueShort(cur)}**`);   // stepCue 带「（验收：…）」，别绕过它
+		lines.push(brief ? `▶ 要做：**${cueShort(cur, 60)}**` : `▶ 要做：**${cueShort(cur)}**`);   // stepCue 带「（验收：…）」，别绕过它
 	} else {
 		lines.push("▶ 主线当前没有进行中的步骤。");
 	}
 
 	const nextPending = steps.find((s) => s.status === "pending" || s.status === "blocked");
 	if (!cur || cur.kind === "detour") {
-		if (nextPending) lines.push(`⏭ 回归后下一步：**主线${stepLabel(nextPending)}**「${stepCue(nextPending)}」${nextPending.status === "blocked" ? "（此前被标阻塞）" : ""}`);
+		if (nextPending) lines.push(brief
+			? `⏭ 下一步：主线${stepLabel(nextPending)}「${cueShort(nextPending, 60)}」${nextPending.status === "blocked" ? "（被阻塞）" : ""}`
+			: `⏭ 回归后下一步：**主线${stepLabel(nextPending)}**「${stepCue(nextPending)}」${nextPending.status === "blocked" ? "（此前被标阻塞）" : ""}`);
 	}
 
 	if (park.length) {
-		const head = park.slice(0, 3).map((p) => `${parkLabel(d, p)} ${p.text}`).join("；");
-		lines.push(`🅿 泊位 ${park.length} 条未处理（一律先入泊，不要现在追；要看内容用 plan_park）`);
+		lines.push(brief ? `🅿 泊位 ${park.length} 条未处理（看清单用 plan_park）` : `🅿 泊位 ${park.length} 条未处理（一律先入泊，不要现在追；要看内容用 plan_park）`);
 	} else {
 		lines.push("🅿 泊位空。");
 	}
@@ -884,7 +1120,7 @@ function anchorText(d, plan, opts = {}) {
 	}
 	// 回程票到期：填了 resume_after_ord 的泊位，等它那条主线步骤做完就主动举手
 	for (const p of dueParking(d, plan.id)) {
-		lines.push(`⏰ 回程票到期：${parkLabel(d, p)}「${p.text}」—— 当初写的是「${p.resume_when}」，现在到了（${resumeLabel(d, p)}已完成）。`);
+		lines.push(`⏰ 回程票到期：${parkLabel(d, p)}「${brief ? String(p.text).slice(0, 60) : p.text}」—— 当初写的是「${p.resume_when}」，现在到了（${resumeLabel(d, p)}已完成）。`);
 	}
 
 	if (opts.verdict) lines.push(`状态判定：${opts.verdict}`);
@@ -999,6 +1235,7 @@ function planSet(d, args, scope = "", session = "") {
 	// resume_after_ord 重置为 0：新计划的步骤编号很可能与旧计划对不上，宁可让提醒失效，也不给一个错的到期点。
 	let carried = 0;
 	let orphaned = [];
+	let undoneParked = 0;   // 【2026-09-20 C 出口】旧计划没做完的步骤会被汇总成一条泊位
 	if (prev) {
 		const rows = d.prepare("SELECT id FROM parking WHERE plan_id=? AND status IN ('parked','escalated')").all(prev.id);
 		carried = rows.length;
@@ -1006,6 +1243,28 @@ function planSet(d, args, scope = "", session = "") {
 			d.prepare("UPDATE parking SET plan_id=?, status='parked', closed_at=NULL, resume_after_ord=0 WHERE plan_id=? AND status IN ('parked','escalated')").run(planId, prev.id);
 			log(d, "park_carryover", { planId, ref: `${carried} 条`, detail: "重规划带过来的未闭合欠账（含偏离进行中的）；到期提醒已重置" });
 		}
+
+		// 【2026-09-20 B 收口】用户原话池要跟过来。
+		// 验收闸门（plan_review 的 user_said 校验）是**按 plan 查原话**的；不搬就意味着：
+		// 用户上一句刚说过的话，在新计划里查不到 → 模型如实照抄却被判成"编的"（假阴性）。
+		const prevVoice = stGet(d, prev.id, "user_voice", "");
+		if (prevVoice) stSet(d, planId, "user_voice", prevVoice);
+
+		// 【2026-09-20 C 出口】旧计划**没做完**的步骤不能无声消失 —— 汇总成一条泊位。
+		// 这就是"整条线假设崩了"的出口：承认计划变了，但没做完的活**有归属、回得来**。
+		// 为什么汇总成一条而不逐条：46 个未完成步骤会变成 46 条泊位，那比丢更糟（清单当场烂掉）。
+		// 已完成的步骤**不入泊** —— 它们是既成事实，在 plan_report / 谱系里体现。
+		const undone = planSteps(d, prev.id).filter((s) => s.status !== "done" && s.kind === "plan");
+		if (undone.length) {
+			const headText = undone.slice(0, 3).map((s) => s.text).join("；");
+			const moreText = undone.length > 3 ? `；等共 ${undone.length} 件` : "";
+			const r2 = d.prepare(
+				"INSERT INTO parking (plan_id, text, from_step, blocking, status, note, resume_when, resume_after_ord, resume_after_step_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)"
+			).run(planId, `（上一版计划没做完）${headText}${moreText}`, 0, 0, "parked", "换计划时自动入泊，避免无声消失", "重估后的计划走到相关部分时", 0, 0, now());
+			undoneParked = undone.length;
+			log(d, "park_carryover", { planId, ref: `#${Number(r2.lastInsertRowid)}`, detail: `旧计划未做完的 ${undone.length} 件步骤自动入泊（换计划 = 整条线重估的出口，不丢活）` });
+		}
+
 		// 旧计划里"活着"的步骤没有被继承 —— 必须**明说**，不能静默丢掉（这正是 plan_set 的代价）
 		orphaned = planSteps(d, prev.id).map((s) => ({ ord: s.ord, text: s.text, done: s.status === "done" }));
 	}
@@ -1083,6 +1342,7 @@ function planSet(d, args, scope = "", session = "") {
 			// 【取代了谁，必须明说】放在最前面 —— "不许静默"的正解是「不许不说」。
 			...replacedNote,
 			...(carried ? [`⚠ 重规划：旧计划有 ${carried} 条未闭合欠账**已搬到本计划**（到期提醒已重置）；plan_park 可查。`] : []),
+			...(undoneParked ? [`📌 旧计划还有 **${undoneParked} 件没做完** —— 已**自动入泊**汇总成一条（不会无声消失），等这条线走到相关部分时能捡回来。`] : []),
 			...(carriedIn.length ? ["📎 显式映射（你说的关系我照办了）：", ...carriedIn.map((x) => `   ${x}`)] : []),
 			...(reworks.length ? ["🔁 返工（旧的那步产出有问题，新步骤取代它）：", ...reworks.map((x) => `   ${x}`), "   → 返工本身也要有验收标准；做完后**下游步骤若建立在旧产出上，应复查**（拿不准就问用户）。"] : []),
 			...(unMappedDone.length ? [
@@ -1100,7 +1360,8 @@ function planSet(d, args, scope = "", session = "") {
 			] : []),
 			...(parsed.filter((s) => !s.acceptance).length ? [
 				`⚠ 有 ${parsed.filter((s) => !s.acceptance).length} 步**没写验收标准**（"怎么算做完"）。`,
-				"   论文实测（arXiv 2604.12147）：**烂计划比没计划更糟**。写了验收，你自己和用户都能判它过没过。"
+				"   论文实测（arXiv 2604.12147）：**烂计划比没计划更糟**。写了验收，你自己和用户都能判它过没过。",
+				"   → 完整体检：`plan_health`（还会查：步数是否合理、有没有重复/过短的步骤、泊位有没有回程票）。",
 			] : []),
 			"执行中冒出任何新问题 → 先 plan_discover 显式判定：permit / defer / decline。",
 			"选 defer 必须一起给 resume_when（回程票）；能给出步骤号就带 resume_after_ord，到期我会主动提醒。",
@@ -1193,6 +1454,55 @@ function planStatus(d, args, scope = "") {
 	else if (cur.kind === "detour") verdict = "偏离中";
 	if (sig.some((s) => s.includes("没有在处理它"))) verdict += "，且有阻塞未处理";
 	if (sig.some((s) => s.includes("没有推进"))) verdict += "，疑似漂移";
+	// ──【A · 2026-09-25 瘦身】默认极简 ──────────────────────────────────────
+	// 实测：plan_status 平均 4,393 字符/次（≈3,000 token），而其中约 90% 是"把同一份计划
+	// 反复搬一遍"。默认改成只回四件事：我在哪 / 下一件 / 几条欠账 / 漂不漂。
+	// 要全文 → detail:"full"；要看某一步（含它的验收与依据）→ step:<id>。
+	const _wantStep = Number(args.step ?? args.step_id ?? 0) || 0;
+	if (_wantStep) {
+		const s = stepById(d, _wantStep);
+		if (!s || Number(s.plan_id) !== Number(plan.id)) {
+			return { ok: false, reason: `本计划里没有 id=${_wantStep} 的步骤 —— 用 plan_status({ detail: "full" }) 看全部步骤 id` };
+		}
+		return {
+			ok: true, has_plan: true,
+			step: { id: s.id, ord: s.ord, kind: s.kind, status: s.status, text: s.text, acceptance: s.acceptance ?? null, evidence: s.evidence ?? null },
+			briefing: [
+				`【步骤详情】${s.kind === "detour" ? `额外步骤${s.detour_no ?? ""}` : `主线${stepLabel(s)}`}（id=${s.id}）· ${s.status}`
+					+ (s.rework_of ? ` · 🔁 返工：取代 #${s.rework_of}` : "") + (s.forced ? " · ⚠ 熔断放行" : ""),
+				`  文字：${s.text}`,
+				s.acceptance ? `  验收：${s.acceptance}` : "  （这一步没写验收标准 —— 这正是值得补的地方）",
+				s.evidence ? `  依据：${s.evidence}` : "",
+			].filter(Boolean).join("\n")
+		};
+	}
+	if (String(args.detail || "brief") !== "full") {
+		const _nextP = steps.find((s) => s.status === "pending" || s.status === "blocked");
+		return {
+			ok: true, has_plan: true,
+			plan_id: plan.id, version: plan.version, title: plan.title,
+			total: steps.length, done: steps.filter((s) => s.status === "done").length,
+			current: cur ? { id: cur.id, ord: cur.ord, kind: cur.kind, text: cueShort(cur, 80) } : null,
+			next: _nextP ? { id: _nextP.id, ord: _nextP.ord, text: cueShort(_nextP, 80) } : null,
+			parking_open: openParkingCount(d, plan), budget: budget(d, plan.id), mute_left: muteLeft(d, plan.id),
+			verdict, drift_signals: sig,
+			briefing: [
+				anchorText(d, plan, { verdict }),
+				// 【2026-09-27 按发布仓契约补回】极简也要给这三样 —— 发布测试（440 项）从默认输出里读它们：
+				//   ① 步骤 id（plan_goto / plan_status(step:) 都要靠它）② 漂移预算 ③ 静音状态。
+				//   砍掉它们会让"能跳步""能对账预算""知道被静音了"三件事失去入口 —— 极简 ≠ 把入口也砍了。
+				...(planStepsAll(d, plan.id).length ? ["", "主线步骤（短版：标记+id+短文本；验收与依据走 plan_status step=<id>）：",
+					...planStepsAll(d, plan.id).map((s) => {
+						const mark = s.status === "done" ? "✔" : s.status === "dropped" ? "⊘丢弃" : s.status === "blocked" ? "⛔" : cur && s.id === cur.id ? "▶" : "·";
+						return `  ${mark} 主线${stepLabel(s)}(id=${s.id}) ${String(s.text).slice(0, 30)}`;
+					})] : []),
+				`漂移预算：已用 ${Math.round(budget(d, plan.id) * 10) / 10}/${threshold} 次无进展调用`,
+				...(muteLeft(d, plan.id) > 0 ? [`⏸ 主动提醒已静音，还剩 ${muteLeft(d, plan.id)} 次调用（静音不是免责，台账照记）`] : []),
+				"→ 单步全文：plan_status step=<id> ｜ 全部：plan_status detail=\"full\" ｜ 欠账清单：plan_park",
+			].filter(Boolean).join("\n")
+		};
+	}
+	// ── 以下是 detail:"full" 的旧路径（内容不变，只把已完成步骤的「依据」摘掉，见 P7）──
 	const detail = {
 		plan_id: plan.id,
 		version: plan.version,
@@ -1204,9 +1514,13 @@ function planStatus(d, args, scope = "") {
 		step_map: planStepsAll(d, plan.id).map((s) => {
 			const mark = s.status === "done" ? "✔" : s.status === "dropped" ? "⊘丢弃" : s.status === "blocked" ? "⛔" : cur && s.id === cur.id ? "▶" : "·";
 			// 已完成步骤把依据也带出来：否则 evidence 就是"只写不能读"，写完没人能核
-			const ev = s.status === "done" && s.evidence
-				? ` · 依据：${String(s.evidence).replace(/\s+/g, " ").slice(0, 70)}`
-				: "";
+			// 【B · 2026-09-25】已完成步骤不再回放「依据」：那是有审计价值的历史，不是每次都要看的决策材料。
+			// 依据没丢 —— plan_status({ step: <id> }) 单独取全文；plan_report / plan_export 也都带着。
+			// 【2026-09-27】继承来源必须可见：它写在 evidence 里的 `[继承自旧计划第 N 步]` 标记上，
+			// 而 B（不回放依据）把整条 evidence 都省了 → 标记跟着消失（发布仓 440 项测试当场抓到）。
+			// 这里只捞**这一种结构标记**单独显示，不让 evidence 借道回流。
+			const _carryMark = (String(s.evidence || "").match(/\[继承自旧计划[^\]]*\]/) || [""])[0];
+			const ev = _carryMark ? ` · ${_carryMark}` : "";
 			return `${mark} 主线${stepLabel(s)}(id=${s.id}) ${stepCue(s)}${s.rework_of ? `〔🔁 返工：取代 #${s.rework_of}〕` : ""}${s.forced ? "〔⚠ 熔断放行〕" : ""}${ev}${staleOrdinalNote(s)}`;
 		}),
 		// 额外步骤独立编号、独立成节：两套编号混在一起就永远说不清"我们到哪了"
@@ -1216,7 +1530,7 @@ function planStatus(d, args, scope = "") {
 			return `${mark} 额外步骤${s.detour_no}(id=${s.id}) ${s.text}${rw}`;
 		}),
 		revisions: d.prepare("SELECT ts, kind, ref, detail FROM ledger WHERE plan_id=? AND kind IN ('amend','insert','drop','replan') ORDER BY id DESC LIMIT 5").all(plan.id),
-		parking_open: openParking(d, plan.id).length,
+		parking_open: openParkingCount(d, plan),
 		budget: budget(d, plan.id),
 		mute_left: muteLeft(d, plan.id)
 	};
@@ -1248,7 +1562,7 @@ function planStatus(d, args, scope = "") {
 				return `  ${t} ${K} ${r.ref} · ${String(r.detail).slice(0, 70)}`;
 			})] : [])
 			,
-			...(openParking(d, plan.id).length ? ["", "泊位（未处理，含回程票）：", ...openParking(d, plan.id).map((p) => {
+			...(openParkingCount(d, plan) ? ["", "泊位（未处理，含回程票）：", ...openParkingByScope(d, plan.scope).map((p) => {
 				const rl = resumeLabel(d, p);
 				const due = dueParking(d, plan.id).some((x) => x.id === p.id);
 				return `  ${parkLabel(d, p)}${p.blocking ? " ⛔" : ""} ${p.text}${p.resume_when ? `｜🔄 ${p.resume_when}${rl ? `（${rl}）` : ""}` : ""}${due ? " ← ⏰ 已到期" : ""}`;
@@ -1417,7 +1731,7 @@ function planStepDone(d, args, scope = "", session = "") {
 				+ (cur.acceptance ? `\n（该步有验收标准 —— 若拿不准是否**真**过了，用 \`ask_user_question\` 让用户确认；判验收是语义判断，别自己拍板。）` : "");
 		} else {
 			setCurrent(d, plan.id, null);
-			const park = openParking(d, plan.id).length;
+			const park = openParkingCount(d, plan);
 			if (completionGate) {
 				// 完成闸门：**语义判断交给用户，但"用户有没有回过话"是可观测事实 → 这一条可以硬判**。
 				// 依据：Anthropic 官方公布 auto mode 分类器对真实越界动作的漏检率是 17%，且承认提示词工程解决不了
@@ -1654,7 +1968,7 @@ function planDiscover(d, args, scope = "") {
 
 	if (disposition === "defer") {
 		log(d, "discover_park", { planId: plan.id, stepId: fromStep, ref: `#${parkId}`, detail: `${text}｜重启条件：${resumeWhen}${resumeAfterOrd ? `（主线第 ${resumeAfterOrd} 步之后）` : ""}` });
-		const open = openParking(d, plan.id).length;
+		const open = openParkingCount(d, plan);
 		return {
 			ok: true,
 			parking_id: parkId,
@@ -1785,12 +2099,15 @@ function planGoto(d, args, scope = "") {
 
 /** 6. plan_park：泊位清单（泊位条目永不自动消失，只能显式关闭） */
 function planPark(d, args, scope = "") {
-	const plan = activePlan(d, scope);
-	if (!plan) return { ok: false, reason: "没有生效计划" };
+	const plan = activePlan(d, scope);   // 可以为 null：**没有计划不等于没有欠账**，泊位照样要看得见
 	const all = args.all === true;
+	// 【修复】按**项目（scope）**取、跨计划 —— 计划被归档后，它的未闭合泊位不能就此从视野里消失。
 	const rows = all
-		? d.prepare("SELECT * FROM parking WHERE plan_id=? ORDER BY id ASC").all(plan.id)
-		: openParking(d, plan.id);
+		? d.prepare(`
+			SELECT p.*, pl.title AS plan_title FROM parking p JOIN plans pl ON pl.id = p.plan_id
+			WHERE pl.scope = ? ORDER BY p.id ASC
+		`).all(scope)
+		: openParkingByScope(d, scope);
 	if (rows.length === 0) return { ok: true, count: 0, briefing: "🅿 泊位空 —— 没有欠账。" };
 	const PARK_CN = { parked: "待处理", escalated: "偏离处理中", done: "已完成", declined: "已判定不做" };
 	const lines = rows.map((p) => {
@@ -1801,7 +2118,9 @@ function planPark(d, args, scope = "") {
 		const back = p.status === "parked" && p.resume_when
 			? `｜🔄 重启条件：${p.resume_when}${resumeLabel(d, p) ? `（${resumeLabel(d, p)}）` : ""}`
 			: "";
-		return `- ${parkLabel(d, p)} [${st}]${p.blocking ? " ⛔阻塞性" : ""} ${p.text}（${where}）${back}${why}`;
+		// 跨计划时**必须说清它挂在哪条计划上**，否则用户以为它属于当前这条
+		const owner = (plan && p.plan_id === plan.id) ? "" : `｜📌挂在《${p.plan_title || "?"}》上`;
+		return `- ${parkLabel(d, p)} [${st}]${p.blocking ? " ⛔阻塞性" : ""} ${p.text}（${where}）${owner}${back}${why}`;
 	});
 	const parked = rows.filter((p) => p.status === "parked").length;
 	return {
@@ -1823,7 +2142,10 @@ function planClose(d, args, scope = "") {
 	if (!plan) return { ok: false, reason: "没有生效计划" };
 	const p = d.prepare("SELECT * FROM parking WHERE id=?").get(Number(args.park_id));
 	if (!p) return { ok: false, reason: `泊位 #${args.park_id} 不存在` };
-	if (p.plan_id !== plan.id) return { ok: false, reason: `泊位 #${p.id} 不属于当前计划（它挂在计划 #${p.plan_id} 上，那条计划可能已被重规划取代）—— 重规划时未闭合的欠账会自动搬过来；若它仍挂在旧计划上，说明它当时已闭合。`, briefing: anchorText(d, plan) };
+	// 【2026-09-20 修复】原来这里**硬拦**"不属于当前计划" → 挂在已归档旧计划上的欠账永远关不掉
+	// （实测：用户让我关泊位 #11，我关不了，因为那条挂在已归档的《补三个缺口》上）。
+	// 现在允许跨计划关闭（同项目内），但把"它原本挂在哪条计划上"写进台账 —— 允许跨计划 ≠ 允许糊涂账。
+	const ownerPlan = p.plan_id === plan.id ? null : d.prepare("SELECT id, title FROM plans WHERE id=?").get(p.plan_id);
 	if (p.status !== "parked") return { ok: false, reason: `泊位 #${p.id} 当前状态是「${p.status}」，只有待处理条目才能关闭` };
 	const why = (args.reason || "").trim();
 	if (!why) return { ok: false, reason: "reason 必填：为什么判定这条不做（禁止静默丢弃欠账）", briefing: anchorText(d, plan) };
@@ -1831,8 +2153,11 @@ function planClose(d, args, scope = "") {
 	// 两种关闭语义必须分开：真的做完了 ≠ 判定不做。以前只有后者，回执会说反话。
 	const outcome = args.outcome === "resolved" ? "resolved" : "declined";
 	if (outcome === "resolved") d.prepare("UPDATE parking SET status='done' WHERE id=?").run(p.id);
-	log(d, outcome === "resolved" ? "park_resolved" : "park_declined", { planId: plan.id, stepId: p.from_step, ref: `#${p.id}`, detail: `${p.text} —— ${outcome === "resolved" ? "已解决" : "判定不做"}，理由：${why}` });
-	const open = openParking(d, plan.id).length;
+	log(d, outcome === "resolved" ? "park_resolved" : "park_declined", {
+		planId: plan.id, stepId: p.from_step, ref: `#${p.id}`,
+		detail: `${p.text} —— ${outcome === "resolved" ? "已解决" : "判定不做"}，理由：${why}${ownerPlan ? `（跨计划关闭：它原本挂在《${ownerPlan.title}》#${ownerPlan.id} 上）` : ""}`
+	});
+	const open = openParkingCount(d, plan);
 	return {
 		ok: true,
 		parking_id: p.id,
@@ -1891,6 +2216,125 @@ function clearWarnUnanswered(d, planId) {
 
 function hasUnansweredWarn(d, planId) {
 	return stGet(d, planId, "warn_unanswered", "") === "1";
+}
+
+/**
+ * plan_gc：陈旧工件衰减（#3 · 2026-09-26）
+ *
+ * 为什么要有（调研结论）：
+ *   库只会涨 —— 已完成步骤的「依据」当年有用，过后只是体积；scope 判决记录是纯观察数据。
+ *   Beads 有 compaction（语义记忆衰减，把老的已关任务摘要化）；
+ *   Claude Code issue #44917 也在喊"陈旧会话工件需要 GC"。我们此前只有 plan_compact（聚合计数型台账）。
+ *
+ * 三条纪律（照本项目的"禁止静默"原则）：
+ *   ① **默认只预演**：不带 confirm 就什么都不动，只报"能衰减多少"；
+ *   ② **只碰够老的，且只截断不抹除**：默认 30 天前的依据，保留前 N 字符 —— 衰减不是删除，
+ *      至少要留下"能认出这是哪件事"的前缀；
+ *   ③ **每次真动都写台账**（kind='gc'，append-only）：衰减本身也必须是可追溯的事实。
+ */
+/**
+ * plan_health：计划质量体检（#7 · 2026-09-26）
+ *
+ * 依据（arXiv 2604.12147，16,991 条 SWE-agent 轨迹）：
+ *   · **烂计划比没计划更糟**（给计划"加料"反而掉分，早期加额外阶段尤其明显）；
+ *   · 所以体检只报"这条计划有没有硬伤"，**不劝你加东西**。
+ *
+ * 判据全是纯代码（不调模型、不花 token）：步数 / 验收覆盖率 / 重复文字 / 过短文字 / 泊位回程票。
+ * 这是把 plan_set 回执里那句"有 N 步没写验收标准"从**一次性提醒**升级成**随时可查的体检报告**。
+ */
+function planHealth(d, args = {}, scope = "") {
+	const plan = activePlan(d, scope);
+	if (!plan) return { ok: false, reason: "没有生效计划" };
+	const steps = planSteps(d, plan.id);        // 只算工作步（验收步不算"要做的事"）
+	const all = planStepsAll(d, plan.id);       // 含被丢弃的，用于查重
+	const findings = [];
+
+	const n = steps.length;
+	if (!n) findings.push("**一步都没有** —— 空计划挡不住注意力（要么把步骤补上，要么 plan_drop 掉它）");
+	else if (n === 1) findings.push("只有 1 步 —— 单步任务其实用不上计划锚，而锚会一直提醒（收益比很低）");
+	else if (n > 12) findings.push(`步骤偏多（${n} 步）—— 论文的观察是"额外阶段会掉分"；长计划人和模型都容易迷路，考虑拆成两条线`);
+
+	const noAcc = steps.filter((s) => !s.acceptance && s.status !== "done");
+	if (noAcc.length) {
+		findings.push(`**${noAcc.length}/${n} 步没写验收标准**（${noAcc.map((s) => stepLabel(s)).join("、")}）—— 没有验收就没法判"到底做完了没"`);
+	}
+
+	const norm = (t) => String(t || "").replace(/\s+/g, "").slice(0, 40);
+	const seen = new Map();
+	for (const s of all) {
+		const k = norm(s.text);
+		if (!k) continue;
+		if (seen.has(k)) findings.push(`步骤文字重复：${stepLabel(seen.get(k))} 与 ${stepLabel(s)} 是同一句话（复制粘贴？）`);
+		else seen.set(k, s);
+	}
+
+	const tooShort = steps.filter((s) => String(s.text || "").trim().length < 6);
+	if (tooShort.length) findings.push(`${tooShort.length} 步文字过短（${tooShort.map((s) => stepLabel(s)).join("、")}）—— 短到看不出要做什么`);
+
+	const noTicket = openParkingByScope(d, plan.scope).filter((p) => !p.resume_when);
+	if (noTicket.length) findings.push(`${noTicket.length} 条泊位**没有回程票**（缺 resume_when）—— 泊位会退化成"没人再看的垃圾抽屉"（README 引 Leroy & Glomb 2018）`);
+
+	const briefing = [
+		`【计划体检】《${plan.title}》｜工作步 ${n} 条 · 额外步骤 ${lineageDetours(d, plan).length} 条｜验收覆盖 ${n - noAcc.length}/${n}`,
+		...(findings.length ? findings.map((f) => "  · " + f) : ["  · 没发现硬伤 👍"]),
+		...(findings.length ? ["", "→ 这些只是**提示**，不是命令：按你的判断改（plan_amend 原地改 / plan_insert 插一步 / plan_drop 丢一步 / plan_gc 衰减陈旧工件）。"] : []),
+	].join("\n");
+
+	return {
+		ok: true,
+		health: { steps: n, acceptance_missing: noAcc.length, findings: findings.length },
+		briefing,
+	};
+}
+
+function planGc(d, args = {}, scope = "", session = "") {
+	const plan = activePlan(d, scope);
+	if (!plan) return { ok: false, reason: "没有生效计划" };
+	const days = Number(args.older_than_days ?? 30);
+	const keep = Number(args.keep_evidence_chars ?? 80);
+	if (!Number.isFinite(days) || days < 1) return { ok: false, reason: "older_than_days 必须是 ≥1 的数字（默认 30）" };
+	if (!Number.isFinite(keep) || keep < 20) return { ok: false, reason: "keep_evidence_chars 必须 ≥20（默认 80）—— 衰减不是抹除，至少要留下能认出这件事的前缀" };
+	const cutoff = Date.now() - days * 86400000;
+	const stale = d.prepare(
+		"SELECT id, ord, length(evidence) AS len FROM steps WHERE plan_id=? AND status='done' AND evidence != '' AND length(evidence) > ? AND COALESCE(done_at, 0) < ? ORDER BY id",
+	).all(plan.id, keep, cutoff);
+	const oldVerdicts = d.prepare("SELECT COUNT(*) c FROM verdicts WHERE plan_id=? AND ts < ?").get(plan.id, cutoff).c;
+	const chars = stale.reduce((a, r) => a + r.len, 0);
+	const head = [
+		`【陈旧工件体检】《${plan.title}》｜阈值 ${days} 天｜依据保留前 ${keep} 字符`,
+		stale.length
+			? `  · 已完成步骤依据：${stale.length} 条可衰减，共 ${chars} 字符（id ${stale.map((s) => s.id).join(",")}）`
+			: "  · 已完成步骤依据：无可衰减",
+		oldVerdicts
+			? `  · scope 判决观察记录：${oldVerdicts} 条可清（纯观察数据，不是审计）`
+			: "  · scope 判决观察记录：无可清理",
+	].join("\n");
+	if (!stale.length && !oldVerdicts) {
+		return { ok: true, gc: { done: false, steps: 0, verdicts: 0 }, briefing: head + "\n\n→ 没有需要衰减的东西（库是干净的）。" };
+	}
+	if (args.confirm !== true) {
+		return {
+			ok: true,
+			gc: { done: false, dry_run: true, steps: stale.length, chars, verdicts: oldVerdicts },
+			briefing: head + "\n\n→ 这一步**只预演，什么都没动**。要真做：`plan_gc({ confirm: true })`（可加 older_than_days / keep_evidence_chars）",
+		};
+	}
+	// ⚠️ SQLite 里**字符串字面量中的 `?` 不是参数占位符** —— 第一版把「原长 ? 字符」写进字面量，
+	// 却传了 3 个值，于是报 "column index out of range"（自测当场抓到）。后缀改成绑定参数。
+	const upd = d.prepare("UPDATE steps SET evidence = substr(evidence, 1, ?) || ? WHERE id = ?");
+	for (const r of stale) upd.run(keep, ` …（已衰减；原长 ${r.len} 字符）`, r.id);
+	if (oldVerdicts) d.prepare("DELETE FROM verdicts WHERE plan_id=? AND ts < ?").run(plan.id, cutoff);
+	log(d, "gc", {
+		planId: plan.id,
+		ref: `steps:${stale.length}`,
+		session,
+		detail: `衰减已完成步骤依据 ${stale.length} 条（id ${stale.map((s) => s.id).join(",")}；共 ${chars} 字符 → 各留 ${keep} 字符）；清理 scope 判决记录 ${oldVerdicts} 条（均为 ${days} 天前）`,
+	});
+	return {
+		ok: true,
+		gc: { done: true, steps: stale.length, chars, verdicts: oldVerdicts },
+		briefing: head + `\n\n✔ 已衰减：步骤依据 ${stale.length} 条（共省 ${chars} 字符）、判决记录 ${oldVerdicts} 条。台账记了一笔（kind=gc，append-only）—— 衰减本身也是可追溯的事实。`,
+	};
 }
 
 function planCompact(d, args, scope = "", session = "") {
@@ -1985,9 +2429,30 @@ function planReview(d, args, scope = "") {
 	// 【假阴性修复】原来只认"用户消息"，但 **ask_user_question 的回答不走用户消息**
 	// （它是以工具结果回来的）→ 用户明明答了，闸门却说"你没问过"。
 	// 实测踩到：用 ask_user_question 问完并拿到回答后，plan_review 仍被拒。
-	// 修法：允许用 **user_said（抄用户原话）** 作为替代证据 —— 和紧急闸门同一套：
-	// **摆证据，不是自报**（编造一句用户没说过的话，成本高得多，而且会显示给用户看）。
+	// 修法：允许用 **user_said（抄用户原话）** 作为替代证据 —— 和紧急闸门同一套。
+	//
+	// 【取长补短 · 2026-09-19】但"抄原话"原先只是**写在注释里的口头约束**
+	// （原话是"编造一句用户没说过的话，成本高得多"），代码里**没有任何校验** ——
+	// 模型完全可以自己编一句填进来。借 mainline 的验收闸门（用户明确回复 + 宿主记录、
+	// 接口层面不许模型代填批准），做本地等价物：**让插件自己当证人**。
+	// 插件同时看得见用户消息（pre-step）与 ask_user_question 的回答（post-execute），
+	// 所以 user_said 必须能在证人池里找到；找不到就是编的 → 拒绝。
+	// 【2026-09-20 修正】池子已从"内存 + sessionKey"改成**挂在 plan 状态上**（见 rememberUserVoice），
+	// 于是这里不再需要 agentKey —— 校验看的是"这条计划听用户说过什么"，与哪个会话无关。
 	const userSaid = (args.user_said || "").trim();
+	if (userSaid && !userReallySaid(d, plan.id, userSaid)) {
+		return {
+			ok: false,
+			reason: [
+				"**这句话在用户的原话里找不到。**",
+				`你填的 user_said 是：「${userSaid}」`,
+				"本次会话里，用户的发言与 `ask_user_question` 的回答中都没有这一句 ——",
+				"所以它不能当作「用户拍板」的证据。**自报可以撒谎，抄原话是摆证据。**",
+				"▶ 两条出路：① 回去问用户，把**他说的原话**照抄进 user_said（不要改写、不要概括）；",
+				"   ② 等用户自己开口说完成/没完成 —— 他直接开口了，就不需要 user_said。"
+			].join("\n")
+		};
+	}
 	if (lastUser <= since && !userSaid) {
 		return {
 			ok: false,
@@ -2015,7 +2480,7 @@ function planReview(d, args, scope = "") {
 		// ① 永远占着"活跃线"的位置 ② 新会话认领它会看到一条"31/31 完成"的活跃计划、
 		// 以为还有活干、也就不自己新建了。**"已完成"和"还活着"必须分得开。**
 		d.prepare("UPDATE plans SET status='done', done_at=? WHERE id=?").run(now(), plan.id);
-		const park = openParking(d, plan.id).length;
+		const park = openParkingCount(d, plan);
 		return {
 			ok: true,
 			briefing: [
@@ -2429,7 +2894,7 @@ function planReport(d, args, scope = "") {
 	const cur = currentStep(d, plan.id);
 	const done = steps.filter((s) => s.status === "done");
 	const todo = steps.filter((s) => s.status !== "done");
-	const park = openParking(d, plan.id);
+	const park = openParkingByScope(d, plan.scope);
 	const dts = lineageDetours(d, plan);
 	const L = [];
 	L.push(`**${cleanForHuman(plan.title)}**`);
@@ -2792,7 +3257,7 @@ function anchorSignature(d, plan) {
 		plan.version,
 		`${steps.filter((s) => s.status === "done").length}/${steps.length}`,
 		cur ? `${cur.kind}:${cur.ord}:${cur.id}` : "none",
-		openParking(d, plan.id).length,
+		openParkingCount(d, plan),
 		`${dts.filter((s) => s.status === "done").length}/${dts.length}`
 	].join("|");
 }
@@ -2820,10 +3285,95 @@ function turnAnchorNotice(d, scope = "") {
 	if (!plan) return null;
 	const steps = planSteps(d, plan.id);
 	const cur = currentStep(d, plan.id);
-	const park = openParking(d, plan.id).length;
+	const park = openParkingCount(d, plan);
 	const dts = detourSteps(d, plan.id);
 	const dtInfo = dts.length ? `｜额外步骤 ${dts.filter((s) => s.status === "done").length}/${dts.length}` : "";
 	const doneN = steps.filter((s) => s.status === "done").length;
+
+	// ──【E · 2026-09-25】新会话首问 ────────────────────────────────────────
+	// 用户诉求原话：「开新会话时，如果计划锚里有未完成的任务，先问我一句要不要完成，
+	//   而不是直接动手。」—— 但也确实有时候就是想接着做，所以做成"问一句 + 三个出口"。
+	// 判据：这条计划的 owner 不是本会话（= 别的会话留下的）且策略不是 inherit/ignore。
+	// 为什么必须在这里 return：没认领就不该被催 —— 对一个"自己没答应过的计划"，
+	// 漂移质问算误报（那正是用户说的"别的会话没做完的事又来烦我"）。
+	// 【为什么不用 sessionKey 当持久键】sessionKeyOf 是**进程内**自增号（WeakMap），
+	// DSH 一重启就重编号 —— 重启后新会话很可能又拿到 "s1"，与库里存的 owner 撞上 →
+	// 判定永远不触发（假阴性）。这正是 rememberUserVoice 那条注释里记过的同款坑。
+	// 所以两个记号都挂在**计划自己的状态**上（见 freshKeyList 的注释）。
+	// 【2026-09-27】保守前提：只有**计划明确声明了 owner 且不是本会话**时才问。
+	// 为什么加：原来只看"本会话没打过照面"，而"照面"是在**工具路径**里记的 ——
+	// 若某次调用拿不到会话（无 exec 上下文），记号打不上，E 就会把"自己的计划"误判成"别人的"，
+	// 把回合锚顶掉（发布仓 440 项测试当场抓到）。owner 为空者一律按"继承"处理，不打扰。
+	if (freshSessionPolicy !== "inherit" && CURRENT_SESSION && plan.owner && plan.owner !== CURRENT_SESSION) {
+		const _engaged = freshKeyList(d, plan.id, "fresh_engaged_keys");
+		if (!_engaged.includes(CURRENT_SESSION)) {
+			if (freshSessionPolicy === "ignore") return null;
+			// 【E v3】先分清"正在别处做"（别问要不要接手，只提醒别插手）与"遗留"（才问要不要接手）
+			const _live = liveElsewhere(d, plan.id);
+			if (_live) {
+				const _notified = freshKeyList(d, plan.id, "fresh_live_notified");
+				if (_notified.includes(CURRENT_SESSION)) return null;   // 提醒过一次就不啰嗦
+				freshKeyAdd(d, plan.id, "fresh_live_notified", CURRENT_SESSION);
+				return notice([
+					"⏸【计划锚】**这个项目上有一条计划正由别的会话在做** —— 不是你的活，别两头做：",
+					`   《${plan.title}》｜${progressText(doneN, steps.length)}` + (cur ? `｜它那边停在${stepLabel(cur)}「${cueShort(cur, 60)}」` : ""),
+					`   最后活动：${_live.mins} 分钟前（会话 ${_live.who}）—— 还在活跃窗口内（${Math.round(liveWindowMs / 60000)} 分钟）`,
+					"",
+					"同一件事两个会话同时改，会互相踩。所以你在这里的正当做法是：",
+					"  · 干你手上这条线的事（默认）—— 不要去动那条计划的状态；",
+					`  · 确实要接手 → 先 \`plan_claim({ plan_id: ${plan.id} })\`（认领会挤掉对方），再动手。`,
+					"",
+					"（这条只提醒一次；要确认那条线到底做到哪了 → 去那个会话，或 plan_status 看只读状态。）"
+				].join("\n"), "plan anchor (live elsewhere)");
+			}
+			const _asked = freshKeyList(d, plan.id, "fresh_asked_keys");
+			if (!_asked.includes(CURRENT_SESSION)) {
+				freshKeyAdd(d, plan.id, "fresh_asked_keys", CURRENT_SESSION);
+				stSet(d, plan.id, "fresh_light_n", "0");
+				return notice((freshAskStyle === "neutral"
+				// 【#6 · 2026-09-26】两种措辞，配置切换（freshAskStyle）——
+				// 依据：同生态的 dsh-anchored 系列实测「**命令式**措辞会把锚定轨迹打回 "let me"」，
+				// 而我们自己的实测是「**菜单式**措辞会被 agent 自己消化掉、根本不问用户」。
+				// 结论：这不是纯风格问题，得用**真实合规率**来决定，所以默认保留命令式，另给一档中性版做对照。
+				? [
+					"👋【计划锚】这个项目上有一条计划，但不是本会话开的：",
+					`   《${plan.title}》｜${progressText(doneN, steps.length)}` + (cur ? `｜停在${stepLabel(cur)}「${cueShort(cur, 60)}」` : ""),
+					"",
+					"两个事实，供你判断：",
+					"  · 这条提示是**注入的**，用户在界面上看不到它 —— 想让他知道这件事，渠道只有 `ask_user_question`；",
+					"  · 接不接这条计划由**他**决定。替他 plan_mute、或者不吭声直接开工，都等于替他拍板",
+					"    （实测踩过：新会话里的 agent 一条自己 mute 了、一条只顾着回答小问题）。",
+					"",
+					`   如果决定问，可以参考：「这个项目上还有一条没做完的计划《${plan.title}》，要我接着做吗？」`,
+					`   三个选项：① 接着做（随后 plan_claim({ plan_id: ${plan.id} }) 认领）② 本会话先不管它 ③ 另起一条（plan_set）`,
+					"",
+					"（这条不会反复问；他不回话的话，之后每 20 步最多轻提一次。）"
+				] : [
+					"👋【计划锚 · 需要你回话】这个项目上有一条计划，但不是本会话开的：",
+					`   《${plan.title}》｜${progressText(doneN, steps.length)}` + (cur ? `｜停在${stepLabel(cur)}「${cueShort(cur, 60)}」` : ""),
+					"",
+					"▶ **现在就用 `ask_user_question` 问用户一句** —— 这是唯一能真正问到他本人的渠道；",
+					"   本提示是**注入给他看不见的**，你不问，他就永远不知道有这回事。",
+					`   问： 「这个项目上还有一条没做完的计划《${plan.title}》，要我接着做吗？」`,
+					`   选项：① 接着做（随后 plan_claim({ plan_id: ${plan.id} }) 认领）② 本会话先不管它 ③ 另起一条（plan_set）`,
+					"",
+					"⛔ **不许自己替用户决定** —— 这条计划是别人的，接不接由他说了算：",
+					"   自己 `plan_mute`、或者干脆不吭声直接开工，都等于替他拍板。",
+					"   （实测踩过：新会话里的 agent 正是这么绕过去的 —— 一条自己 mute 了，一条只顾着回答小问题。）",
+					"（问一次就够；他不回话的话，之后每 20 步会再轻提一次。）"
+				]
+					).join("\n"), "plan anchor (fresh session)" + (freshAskStyle === "neutral" ? " / neutral" : ""));
+			}
+			const ln = Number(stGet(d, plan.id, "fresh_light_n", "0")) + 1;
+			stSet(d, plan.id, "fresh_light_n", String(ln));
+			if (ln > 2 && ln % FRESH_LIGHT_EVERY !== 0) return null;   // 前两回合各轻提一次（防 agent 装没看见），之后每 FRESH_LIGHT_EVERY 步一次
+			return notice([
+				`👋【计划锚】还没确认：这个项目上有一条别的会话开的计划《${plan.title}》（${progressText(doneN, steps.length)}）——`,
+				"   → 用 `ask_user_question` 问用户「要不要接着做？」，别自己 plan_mute（那是替他拍板）。",
+				`   → 他说不管 → 正常干这次的活；他说接着做 → plan_claim({ plan_id: ${plan.id} })`,
+				].join("\n"), "plan anchor (fresh, light)");
+		}
+	}
 	// 【验收步】提前算好 —— **缩短版也要带它**。
 	// 用户当场指出："缩短版的锚没带我验收的那个" —— 缩短只该省掉冗余措辞，
 	// 不该把"有事等你"这个信息省掉（信息存在 ≠ 可见，这是今天第 N 次踩）。
@@ -2994,6 +3544,17 @@ function turnAnchorNotice(d, scope = "") {
 	if (_inf && !(_inf.birth === _inf.now && _inf.kept === _inf.birth)) {
 		if (_inf.inflate > 0.3 || _inf.PPC < 0.5) bits.push(`📈 计划演进：膨胀 ${Math.round(_inf.inflate * 100)}% · 覆盖 ${Math.round(_inf.PPC * 100)}% · 顺序 ${Math.round(_inf.POC * 100)}% · 保真 ${Math.round(_inf.PPF * 100)}%`);
 	}
+	// 【2026-09-20 D 治"被绕晕"】这一段计划改过太多次 → **主动**递一次整理稿。
+	// 为什么必须有：plan_report 早就有，但它是**被动**的（用户说"我乱了"才给）——
+	// 而用户往往没意识到该要。实测数据支撑：11 条计划里 7 条被取代、多数活不到 20 分钟；
+	// 计划变更（insert/replan/amend）累计几十次 —— "晕"就晕在这儿。
+	// 只提示一次、每隔 5 次变更再提一次：免得这条提示自己变成新的墙纸。
+	const revCount = d.prepare("SELECT COUNT(*) c FROM ledger WHERE plan_id=? AND kind IN ('insert','replan','amend')").get(plan.id).c;
+	const revNudged = Number(stGet(d, plan.id, "rev_nudged", "0"));
+	if (revCount >= 5 && revCount - revNudged >= 5) {
+		stSet(d, plan.id, "rev_nudged", String(revCount));
+		bits.push(`🧭 这一段计划已经改过 ${revCount} 次了 —— 要不要我给你一份**整理稿**？（plan_report：现在到底在做什么、为什么这么改，零编号零术语，可直接贴给你看）`);
+	}
 	// 【可见但不膨胀】只报条数 + **最新一条的标题** ——
 	// 报全文会膨胀（实测 5 条几百字）；只报条数又会让我忘了"挂着什么"。
 	// 标题足够提醒，细节用 plan_park 查。
@@ -3026,8 +3587,12 @@ function turnAnchorNotice(d, scope = "") {
 function driftNotice(d, plan) {
 	const b = budget(d, plan.id);
 	const cur = currentStep(d, plan.id);
-	const gentle = threshold;
-	const firm = escalateAt;
+	// 【2026-09-20 A 降噪·其一】当前步是**额外步骤**时，两档阈值都翻倍。
+	// 理由：额外步骤是**用户另外要的活**，做多久都合法 —— 实测 30 次提醒里 10 次在催它，全是误报。
+	// 但不完全静音：拖太久仍要提醒（那可能意味着这一步本身该拆开、或者该重估整条线）。
+	const isDetour = !!(cur && cur.kind === "detour");
+	const gentle = isDetour ? threshold * 2 : threshold;
+	const firm = isDetour ? escalateAt * 2 : escalateAt;
 	const stage = b >= firm ? "firm" : b >= gentle ? "gentle" : null;
 	if (!stage) return null;
 	// 【防墙纸·关键修复】**全部工作步都完成时，"没有进展"是正常状态 —— 不该质问。**
@@ -3053,7 +3618,7 @@ function driftNotice(d, plan) {
 	stSet(d, plan.id, "drift_fired", fired ? fired + "," + key : key);
 
 	const steps = planSteps(d, plan.id);
-	const park = openParking(d, plan.id);
+	const park = openParkingByScope(d, plan.scope);
 	const target = cur && cur.kind === "detour"
 		? `**额外步骤 ${cur.detour_no}**「${cur.text}」`
 		: cur ? `**主线第 ${cur.ord}/${steps.length} 步**「${cur.text}」` : "当前计划";
@@ -3147,21 +3712,84 @@ function isFileMutating(toolName) {
 // 【误报修复·其二 · 更本质的一条】当这些词**后面紧跟「的」**时，用户是在**引用**这个词
 // （例如"就是那个**先别**的**那个事情**"），而不是在下指令。
 // **"提到某个词" ≠ "用那个词下命令"** —— 这是从一次真实误报里学到的。
-const RX_INTERRUPT = /(等一下|等下|停一下|先停|先别(?!的|管|看|说|提)|先不(?!的|管|说|提|用)|打住|暂停|慢着|别急)/;
+const RX_INTERRUPT = /(等一下|等下|停一下|先停|先别(?!的|管|看|说|提)|先不(?!的|管|看|说|提|用)|打住|暂停|慢着|别急)/;
 const RX_PROGRESS = /(做到哪|干到哪|进行到哪|走到哪)/;
 const RX_SUMMARY = /(整理|梳理|汇总|总结|归纳|列一下|列出来|理一下)/;
 const RX_CONFUSED = /(混乱|有点乱|很乱|太乱|绕晕|晕了|懵|搞乱|搞混|弄混|乱套|忘记|忘了|记不清|不记得)/;
 const RX_APPEND = /(对了|另外|顺手|再加|加一个|还要|补充|顺便)/;
 const RX_SHORT_OK = /(我们|咱们|当前|现在|这版|刚才)/;
 
+// 【误报修复·其三 · 2026-09-19 真实翻车】用户**粘贴一长段外部文档**时，
+// 文档正文里的词**不是他的话**。当天实证：用户贴了一份第三方插件的 README 全文，
+// 正文里有一句「普通"先停吧"仍应立即遵守」→ RX_INTERRUPT 命中 `先停` →
+// 注入「他在叫你停」→ 差点真的停手，而用户其实只是让我看那份文档。
+// 根因两条：**① 没区分"用户自己说的话"与"他引用/粘贴的文本"；② 没看命中位置**。
+// 判据：叫停是**即时反应**，必然很短、或出现在消息**开头**；
+// 长消息中部的命中，多半是在**描述/引用**那个词 —— 与前述「先别的」同一条道理。
+// 短消息（≤80 字）全认；长消息只认位置靠前的命中。围栏代码块里的词一律不算。
+//
+// 【2026-09-20 用真实语料回测修正】原来的位置阈值取 20，**太严了**：从 96 条真实用户原话
+// （只取 source.kind="user"，见 D:\dsh\.tmp\signals.txt）里回测出 **4 例漏报** ——
+// 全是长消息中部、但确实是真叫停的句子（@35 / @58 / @69 / @77）：
+//   「…反正你先别动它就是你先看清楚了…」「…呃等一下你先别推送你先告诉我你的简介…」
+//   「…你先别着急改造微信小游戏里面你先把ui确定好了」「…等一下啊我们现在修复的不是数字三农…」
+// 放到 80 之后：这 4 条全部捞回，而长文档类的命中在 @390/@613/@3116/@3377，仍被正确拦住。
+// 于是判据等价于一句更好记的话：**命中必须出现在前 80 字内**。
+const SIGNAL_SHORT_MAX = 80;
+const SIGNAL_AT_MAX = 80;
+// 描述态：信号词出现在「自动/会/被/能/自己/就 + 暂停/停止」里时，是在**描述某个东西的状态**，
+// 不是在下指令。真实语料里唯一的纯误报就是这条：「一滑就自动暂停了，无法播放」（在报 bug）。
+const RX_DESC_STATE = /(自动|会|被|能|自己|就)\s*(暂停|停止|停下|停住)/;
+// 被引号"抬起"的词是在**引用**它，不是下指令 —— 例：普通"先停吧"仍应立即遵守。
+// 【为什么必须有这一条】位置判据单独用不够：阈值从 20 放宽到 80 之后，"粘贴的短文档"
+// （命中位置正好落在 20~80 之间）会重新误报 —— 测试 72 当场抓到了这个回归。
+// 而真叫停（「反正你先别动它就是你先看清楚了」）不会被引号抬起来，两者因此可分。
+const OPEN_QUOTES = "「『“”‘’\"'`";
+
+/** 剥掉围栏代码块：用户粘贴代码/日志时，块里的词不是他的话。 */
+function stripFencedBlocks(text) {
+	return String(text || "").replace(/```[\s\S]*?```/g, " ").replace(/~~~[\s\S]*?~~~/g, " ");
+}
+
+/**
+ * 命中词所在的**那一行**是不是 markdown 结构行（标题 / 列表项 / 表格）。
+ * 【为什么必须有这一条】光看位置分不开：粘贴短文档的命中位置（实测 @27，在列表项「- 暂停与外部等待…」里）
+ * 与真叫停（@35 ~ @77）**区间重叠** —— 只有"这一行长什么样"能分开这两类。
+ * 真叫停（「反正你先别动它就是你先看清楚了」）是自然对话，不会是列表项。
+ */
+function inDocLine(text, at) {
+	const lineStart = text.lastIndexOf("\n", at - 1) + 1;
+	const nl = text.indexOf("\n", at);
+	const line = text.slice(lineStart, nl === -1 ? text.length : nl);
+	return /^\s{0,3}(#{1,6}\s|[-*+]\s|\d+\.\s|\|)/.test(line);
+}
+
+/** 这条信号算不算数：前 80 字内命中，且不是描述态、不是被引号抬起的引用、也不在文档结构行里。 */
+function signalCounts(text, at) {
+	if (RX_DESC_STATE.test(text)) return false;
+	// 注意：at=0 时 text[-1] 是 undefined。**`"".includes("")` 恒为 true**，
+	// 直接把判据写成 includes(text[at-1] || "") 会把所有句首的叫停全拦掉（实测：一次挂 10 条）。
+	const before = at > 0 ? text[at - 1] : "";
+	if (before && OPEN_QUOTES.includes(before)) return false;
+	if (inDocLine(text, at)) return false;
+	return at <= SIGNAL_AT_MAX;
+}
+
 /** 判断用户这句话属于哪类信号；返回 null = 不是信号（默认不打扰）。 */
 function detectUserSignal(rawText) {
-	const t = String(rawText || "").trim();
+	const t = stripFencedBlocks(rawText).trim();
 	if (!t) return null;
-	const short = t.length <= 80; // ③ 长度判据
+	const short = t.length <= SIGNAL_SHORT_MAX; // ③ 长度判据
 	const hit = (rx) => { const m = t.match(rx); return m ? m[0] : ""; };
-	if (RX_INTERRUPT.test(t)) return { kind: "interrupt", hit: hit(RX_INTERRUPT) };
-	if (RX_PROGRESS.test(t)) return { kind: "progress", hit: hit(RX_PROGRESS) };
+	// 打断类与问进度类：**注入型**行为（会直接把简报推给用户），误报代价最大 → 过位置判据
+	if (RX_INTERRUPT.test(t)) {
+		const at = t.search(RX_INTERRUPT);
+		if (signalCounts(t, at)) return { kind: "interrupt", hit: hit(RX_INTERRUPT) };
+	}
+	if (RX_PROGRESS.test(t)) {
+		const at = t.search(RX_PROGRESS);
+		if (signalCounts(t, at)) return { kind: "progress", hit: hit(RX_PROGRESS) };
+	}
 	// 整理请求：动作词 +（自述混乱 或 短消息里指"我们的计划"）——两道约束，避免把任务描述当请求
 	if (RX_SUMMARY.test(t) && (RX_CONFUSED.test(t) || (short && RX_SHORT_OK.test(t)))) {
 		return { kind: "summary", hit: hit(RX_SUMMARY) };
@@ -3205,7 +3833,7 @@ function progressBriefing(d, plan) {
 	const steps = planSteps(d, plan.id);
 	const cur = currentStep(d, plan.id);
 	const done = steps.filter((s) => s.status === "done");
-	const park = openParking(d, plan.id);
+	const park = openParkingByScope(d, plan.scope);
 	const lines = ["【真实进度 —— 照这个答，不要凭记忆】"];
 	const rev = revisionNote(d, plan.id);
 	if (rev) lines.push(`⚠ 计划刚修订过：${rev}`);
@@ -3224,6 +3852,158 @@ function progressBriefing(d, plan) {
 
 /** 每个 agent 待处理的用户信号（pre-step 检测、下一次工具调用后注入 —— 用已验证过的注入通道）。 */
 const pendingUserSignal = new WeakMap();
+
+/**
+ * 【取长补短 · 验收闸门】「用户原话池」—— 用来**校验**模型声称的"用户说的"。
+ * 由来（借 mainline 的长处）：它的验收是「用户明确回复 → 宿主 hook 记录」，接口层面**不许模型代填批准**。
+ * 我们这边没有等价的宿主记录，但有等价物：**插件同时看得见用户消息（pre-step）
+ * 与 ask_user_question 的回答（post-execute 的工具结果）** —— 那就由插件来当这个证人。
+ * 规则：plan_review 的 user_said 必须能在池子里**找到**；找不到就是编的 → 拒绝。
+ * 为什么这算硬拦而不是自觉：**要编一句用户没说过的话，得先骗过用户本人**。
+ *
+ * 【2026-09-20 修正 · 泊位 #17】原先这个池子是**内存 Map + sessionKey 做键**，有两个真实缺陷：
+ *   ① `sessionKeyOf` 是**进程内**自增号（WeakMap），DSH 一重启就全变 → 用户的话还在，却查不到；
+ *   ② 同一条计划**换个会话**去验收时 agent 对象不同 → key 不同 → 同样查不到。
+ * 两个都会造成假阴性：模型如实照抄原话，却被判成"编的"。
+ * 现在改为**挂在 plan 自己的状态上**：原话本来就是"这条计划的验收证据"，不属于某个会话。
+ */
+const USER_VOICE_KEEP = 8;
+
+function rememberUserVoice(d, planId, text) {
+	const t = String(text || "").trim();
+	if (!planId || !t) return;
+	let arr = [];
+	try { arr = JSON.parse(stGet(d, planId, "user_voice", "[]") || "[]"); } catch { arr = []; }
+	if (!Array.isArray(arr)) arr = [];
+	arr.push(t);
+	while (arr.length > USER_VOICE_KEEP) arr.shift();
+	try { stSet(d, planId, "user_voice", JSON.stringify(arr)); } catch { /* 写不进去也不能打断主流程 */ }
+}
+
+/** 归一化：去掉空白与中英标点，只留实义字符 —— 免得因为抄写时的标点差异被误判成"编的"。 */
+function normalizeVoice(s) {
+	return String(s || "").toLowerCase().replace(/[\s，。！？、；：""''《》（）()【】\[\]{}…—\-·.,!?;:'"`]/g, "");
+}
+
+/** 用户真的说过这句吗？（user_said 归一化后必须是某条用户原话的子串） */
+function userReallySaid(d, planId, said) {
+	const q = normalizeVoice(said);
+	if (!q) return false;
+	let arr = [];
+	try { arr = JSON.parse(stGet(d, planId, "user_voice", "[]") || "[]"); } catch { return false; }
+	if (!Array.isArray(arr)) return false;
+	return arr.some((t) => normalizeVoice(t).includes(q));
+}
+
+/** 从任意结构里捞出所有字符串 —— 用来兜住 ask_user_question 结果的结构差异，不猜字段名。 */
+function collectStrings(x, out = [], depth = 0) {
+	if (out.length > 60 || depth > 6) return out;
+	if (typeof x === "string") { out.push(x); return out; }
+	if (x && typeof x === "object") for (const v of Object.values(x)) collectStrings(v, out, depth + 1);
+	return out;
+}
+
+/* ---------------------------------------------------------------------------
+ * 8c. plan_backup / plan_export（2026-09-20）
+ * 库里跑着的是**活数据**，所以必须能安全地留一份快照、并且能把历史完整交出去。
+ * 【为什么不能直接复制文件】库跑在 WAL 模式下，`.db` / `-wal` / `-shm` 三件套在写入过程中
+ * **并不自洽** —— 拷出来的可能缺最近事务，甚至撕裂。（隔壁 mainline 的文档专门点名过这个坑。）
+ * 所以这里用 SQLite 自己的 `VACUUM INTO` 出一致快照（产物是单个文件），
+ * 并且**当场用 PRAGMA integrity_check 验一遍**才敢说成功 —— 生成完就宣布成功不算数。
+ * ------------------------------------------------------------------------- */
+
+/** 备份默认落在库文件旁边的 backups/（跟库同一个盘，便于整包搬走）。
+ *  用模块级 `dbPath` 而不是 `config` —— 见上面那条真机教训。 */
+function backupsDir() {
+	return dbPath ? join(dirname(dbPath), "backups") : "backups";
+}
+function stampText(ts) {
+	const dt = new Date(Number(ts) || Date.now());
+	const p = (n, w = 2) => String(n).padStart(w, "0");
+	// 带毫秒：同一秒内连点两次也会得到两个不同文件名（秒级会撞上"同名备份已存在"）
+	return `${dt.getFullYear()}${p(dt.getMonth() + 1)}${p(dt.getDate())}-${p(dt.getHours())}${p(dt.getMinutes())}${p(dt.getSeconds())}${p(dt.getMilliseconds(), 3)}`;
+}
+
+function planBackup(d, args = {}) {
+	const dir = String(args.dir || "").trim() || backupsDir();
+	try { mkdirSync(dir, { recursive: true }); } catch (e) { return { ok: false, reason: `备份目录建不出来：${String(e && e.message || e)}` }; }
+	const out = join(dir, `plan-${stampText()}.db`);
+	if (existsSync(out)) return { ok: false, reason: `同名备份已存在（同一秒内调了两次？）：${out}` };
+	try {
+		d.exec(`VACUUM INTO '${String(out).replace(/'/g, "''")}'`);
+	} catch (e) {
+		return { ok: false, reason: `VACUUM INTO 失败（库可能正忙，稍后再试）：${String(e && e.message || e)}` };
+	}
+	// **自证**：当场把备份打开验一遍，而不是"生成完就宣布成功"
+	let check = "未检查", size = 0, plans = "?", ok = false;
+	try {
+		size = statSync(out).size;
+		const v = new DatabaseSync(out, { readOnly: true });
+		const row = v.prepare("PRAGMA integrity_check").get();
+		check = String((row && (row.integrity_check ?? Object.values(row)[0])) ?? "?");
+		const n = v.prepare("SELECT COUNT(*) AS n FROM plans").get();
+		plans = n ? String(n.n) : "?";
+		v.close();
+		ok = check.toLowerCase() === "ok";
+	} catch (e) {
+		check = `打不开：${String(e && e.message || e)}`;
+	}
+	return {
+		ok,
+		briefing: [
+			ok ? "【备份完成 · 已当场验过】" : "【备份生成了，但自检没过 —— 先别依赖它】",
+			`文件：${out}`,
+			`大小：${(size / 1024).toFixed(1)} KB · 含计划 ${plans} 条`,
+			`自检：PRAGMA integrity_check → ${check}`,
+			"做法：SQLite 的 `VACUUM INTO`（一致快照）；**没有**复制 .db/-wal/-shm —— 那种拷法在写入时不自洽。",
+			"恢复提示：先把所有访问这个库的会话停掉，另存当前库，再用这个文件替换。**不要在运行中覆盖**（旧的 -wal/-shm 要一起清掉）。"
+		].join("\n")
+	};
+}
+
+function planExport(d, args = {}, scope = "") {
+	const pid = Number(args.plan_id || 0);
+	const plan = pid ? d.prepare("SELECT * FROM plans WHERE id = ?").get(pid) : activePlan(d, scope);
+	if (!plan) return { ok: false, reason: pid ? `没有 id=${pid} 的计划` : "当前项目没有生效计划，也没给 plan_id" };
+	const steps = planSteps(d, plan.id);
+	const park = d.prepare("SELECT * FROM parking WHERE plan_id = ? ORDER BY id").all(plan.id);
+	const led = d.prepare("SELECT * FROM ledger WHERE plan_id = ? ORDER BY id").all(plan.id);
+	const done = steps.filter((s) => s.status === "done").length;
+	const L = [];
+	L.push(`# 计划导出：${plan.title}`);
+	L.push("");
+	L.push(`- 计划 id=${plan.id} · 版本 v${plan.version} · 状态 ${plan.status}`);
+	L.push(`- 进度：${progressText(done, steps.length)}`);
+	if (plan.reason) L.push(`- 立计划 / 换线理由：${plan.reason}`);
+	L.push("");
+	L.push("## 步骤");
+	steps.forEach((s) => {
+		L.push(`- [${s.status === "done" ? "x" : " "}] ${stepLabel(s)}　${s.text}`);
+		if (s.acceptance) L.push(`  - 验收：${s.acceptance}`);
+		if (s.evidence) L.push(`  - 依据：${s.evidence}`);
+	});
+	if (park.length) {
+		L.push("");
+		L.push("## 泊位");
+		park.forEach((p) => L.push(`- [${p.status}] ${p.text}${p.note ? `（${p.note}）` : ""}`));
+	}
+	L.push("");
+	L.push(`## 台账（${led.length} 条）`);
+	led.forEach((r) => L.push(`- ${new Date(Number(r.ts)).toISOString()} · ${r.kind} · ${r.detail || ""}`));
+	const dir = String(args.dir || "").trim() || backupsDir();
+	try { mkdirSync(dir, { recursive: true }); } catch (e) { return { ok: false, reason: `导出目录建不出来：${String(e && e.message || e)}` }; }
+	const out = join(dir, `plan-${plan.id}-${stampText()}.md`);
+	try { writeFileSync(out, L.join("\n"), "utf8"); } catch (e) { return { ok: false, reason: `写文件失败：${String(e && e.message || e)}` }; }
+	return {
+		ok: true,
+		briefing: [
+			`【导出完成】${plan.title}`,
+			`文件：${out}`,
+			`内容：${steps.length} 个步骤 · ${park.length} 条泊位 · ${led.length} 条台账`,
+			"用途：存档、交接、或拿给第三方逐条核对（台账是 append-only 的，可以对着看）。"
+		].join("\n")
+	};
+}
 /** 【记账提醒】用户上一轮是不是只说了"一句短话"（典型的选项回答：B吧 / 需要 / 改 / 可以）。 */
 const shortTurn = new WeakMap();
 /** 本回合有没有碰过 plan_* 工具（碰过 = 记过账）。 */
@@ -3246,6 +4026,14 @@ function apply(ctx, config) {
 	scopeMode = String(config.scopeMode ?? "observe");
 	completionGate = config.completionGate !== false;
 	noPlanNudge = config.noPlanNudge !== false;
+	liveWindowMs = Number(config.liveWindowMinutes ?? 60) * 60 * 1000;
+	if (!Number.isFinite(liveWindowMs) || liveWindowMs <= 0) throw new Error(`plan-anchor: invalid liveWindowMinutes ${config.liveWindowMinutes} — must be a positive number`);
+	freshAskStyle = String(config.freshAskStyle ?? "directive");
+	if (!["directive", "neutral"].includes(freshAskStyle)) throw new Error(`plan-anchor: invalid freshAskStyle "${freshAskStyle}" — must be directive | neutral`);
+	toolTier = String(config.toolTier ?? "all");
+	if (!(toolTier in TOOL_TIER_RANK)) throw new Error(`plan-anchor: invalid toolTier "${toolTier}" — must be core | standard | all`);
+	freshSessionPolicy = String(config.freshSessionPolicy ?? "ask");
+	if (!["ask", "inherit", "ignore"].includes(freshSessionPolicy)) throw new Error(`plan-anchor: invalid freshSessionPolicy "${freshSessionPolicy}" — must be ask | inherit | ignore`);
 	muteCap = Number(config.muteCap ?? 120);
 	if (!Number.isInteger(muteCap) || muteCap < 1) throw new Error(`plan-anchor: invalid muteCap ${muteCap} — must be an integer >= 1`);
 	noPlanTurns = Number(config.noPlanTurns ?? 6);
@@ -3283,8 +4071,12 @@ function apply(ctx, config) {
 		},
 		{
 			name: "plan_status",
-			description: "回归锚：我现在在第几步、下一步做什么、泊位几条、是否正在漂移。任何「我是不是跑偏了」的时刻都调它。",
-			params: { threshold: { type: "number", description: "漂移判定的调用次数阈值（默认 12，仅本次查询生效）" } },
+			description: "回归锚：我现在在第几步、下一步做什么、泊位几条、是否正在漂移。默认极简（省上下文）；要某一步全文用 step:<id>，要全部用 detail:\"full\"。",
+			params: {
+				threshold: { type: "number", description: "漂移判定的调用次数阈值（默认 12，仅本次查询生效）" },
+				detail: { type: "string", description: "brief（默认·极简：我在哪 / 下一件 / 几条欠账 / 漂不漂）/ full（全部步骤 + 泊位 + 修订史）" },
+				step: { type: "number", description: "只要某一步的全文（含它的验收与依据）—— 传步骤 id" }
+			},
 			exec: (a, x) => withRefs(d, a, scopeOf(x), planStatus, sessionKeyOf(x && x.agent))
 		},
 		{
@@ -3392,13 +4184,30 @@ function apply(ctx, config) {
 		},
 		{
 			name: "plan_review",
-			description: "把「计划算不算完成」交给用户裁：必须先用 ask_user_question 问过用户，再调本工具（用户经 ask_user_question 回答时，把原话抄进 user_said）。confirmed=false 会把最后一步如实退回未完成。",
+			description: "把「计划算不算完成」交给用户裁：必须先用 ask_user_question 问过用户，再调本工具（用户经 ask_user_question 回答时，把原话抄进 user_said）。confirmed=false 会把最后一步如实退回未完成。**user_said 会被宿主校验**：插件同时看得见用户消息与 ask_user_question 的回答，编一句用户没说过的话会被当场拒掉。",
 			params: {
 				confirmed: { type: "boolean", required: true, description: "用户是否确认完成" },
 				note: { type: "string", description: "用户的原话/意见（confirmed=false 时务必填，会记进台账与步骤证据）" },
-				user_said: { type: "string", description: "**用户同意/否决的原话**（照抄）。用户通过 ask_user_question 回答时用它 —— 那种回答不走用户消息，闸门看不见；抄原话是摆证据，不是自报。" }
+				user_said: { type: "string", description: "**用户同意/否决的原话**（照抄，不要改写、不要概括）。用户通过 ask_user_question 回答时用它 —— 那种回答不走用户消息，闸门看不见。**这句会被校验**：编一句用户没说过的话会被当场拒掉（自报可以撒谎，抄原话是摆证据）。" }
 			},
 			exec: (a, x) => withRefs(d, a, scopeOf(x), planReview, sessionKeyOf(x && x.agent))
+		},
+		{
+			name: "plan_backup",
+			description: "给计划库做一份**一致性快照**：用 SQLite 的 `VACUUM INTO` 出单文件备份，并**当场用 PRAGMA integrity_check 自检**，验过才报成功。**不要**用复制 .db/-wal/-shm 的方式备份 —— WAL 模式下那样拷出来的库不自洽（可能缺最近事务甚至撕裂）。",
+			params: {
+				dir: { type: "string", description: "备份目录（可选）。默认放在库文件旁边的 `backups/`。" }
+			},
+			exec: (a, x) => withRefs(d, a, scopeOf(x), planBackup, sessionKeyOf(x && x.agent))
+		},
+		{
+			name: "plan_export",
+			description: "把一条计划的完整历史（步骤 + 泊位 + 台账）导出成一份 Markdown 文件，用于存档 / 交接 / 给第三方逐条核对。不传 plan_id 就导出当前项目生效的那条。",
+			params: {
+				plan_id: { type: "number", description: "要导出的计划 id（可选；不传则用当前项目生效的计划）" },
+				dir: { type: "string", description: "导出目录（可选）。默认放在库文件旁边的 `backups/`。" }
+			},
+			exec: (a, x) => withRefs(d, a, scopeOf(x), planExport, sessionKeyOf(x && x.agent))
 		},
 		{
 			name: "plan_compact",
@@ -3467,10 +4276,33 @@ function apply(ctx, config) {
 			description: "静音主动提醒 N 次工具调用（计划仍在锚位上，只是不打扰）。",
 			params: { calls: { type: "number", description: "静音的调用次数（默认 20）" } },
 			exec: (a, x) => withRefs(d, a, scopeOf(x), planMute, sessionKeyOf(x && x.agent))
-		}
+		},
+		{
+			name: "plan_gc",
+			description: "陈旧工件衰减：把**够老的**已完成步骤依据截断（保留前缀，不抹除）+ 清掉够老的 scope 观察记录。默认只预演，带 confirm 才真动；每次真动都写台账（不许静默）。与 plan_compact 分工：compact 聚合计数型台账，gc 衰减工件体积。",
+			params: {
+				older_than_days: { type: "number", description: "只动这么久以前的（默认 30 天）" },
+				keep_evidence_chars: { type: "number", description: "依据保留前多少字符（默认 80，最小 20）—— 衰减不是抹除" },
+				confirm: { type: "boolean", description: "true 才真衰减；不传 = 只预演（默认）" }
+			},
+			exec: (a, x) => withRefs(d, a, scopeOf(x), planGc, sessionKeyOf(x && x.agent))
+		},
+		{
+			name: "plan_health",
+			description: "计划质量体检（只读）：步数是否合理、验收覆盖率、有没有重复/过短/无验收的步骤、泊位有没有回程票。依据 arXiv 2604.12147「烂计划比没计划更糟」—— 只报硬伤，不劝你加东西。",
+			params: {},
+			exec: (a, x) => withRefs(d, a, scopeOf(x), planHealth)
+		},
 	];
 
+	// 【#5】先如实报账：挂几个、省几个、没挂的是哪些、怎么全挂 —— **不静默降级**
+	const _skipped = tools.filter((t) => !tierAllows(t.name)).map((t) => t.name);
+	if (_skipped.length) {
+		console.log(`[plan-anchor] 工具档 ${toolTier}：挂载 ${tools.length - _skipped.length}/${tools.length}，未挂载 ${_skipped.join(", ")} —— 要全挂就写 toolTier: "all"`);
+	}
 	for (const t of tools) {
+		// 档位过滤：不在此档的工具不注册（省的是**每次请求**的 schema 开销）
+		if (!tierAllows(t.name)) continue;
 		ctx.tools.register(defineTool({
 			name: t.name,
 			description: t.description,
@@ -3544,6 +4376,10 @@ function apply(ctx, config) {
 				const turns0 = (discussTurns.get(agent) || 0) + 1;
 				discussTurns.set(agent, turns0);
 				if (turns0 === 1 && !p2) pendingFirstTurn.set(agent, true);
+				// 【验收闸门】把用户原话存进"证人池"：plan_review 声称"用户说的"时，必须在这里找得到。
+				// 放在信号检测**之前** —— 不管这句话算不算"信号"，它都是用户真的说过的话。
+				// 存进 **plan 状态**（不是内存、也不按会话）：换会话、重启之后仍然查得到。
+				if (p2) rememberUserVoice(d, p2.id, text);
 				const sig = detectUserSignal(text);
 				// 【真 bug 修复】没信号时必须**清掉**上一回合残留的 ——
 				// 否则一个过期的信号会挂在那里，直到你下一次调工具才突然触发。
@@ -3569,6 +4405,15 @@ function apply(ctx, config) {
 	ctx.on("tools/post-execute", async (exec, _result, next) => {
 		// 【缺口 1 修复】同上：工具后置钩子也要认会话（它不在 withRefs 里）
 		CURRENT_SESSION = sessionKeyOf(exec && exec.agent);
+		// 【验收闸门】ask_user_question 的回答**不走用户消息**（它以工具结果的形式回来），
+		// 所以它也得进"证人池" —— 否则用户明明答了，plan_review 却会把模型抄的原话判成"编的"。
+		// 用 collectStrings 把结果里的字符串全捞出来，不猜字段名。
+		try {
+			if (exec && exec.name === "ask_user_question") {
+				const pv = activePlan(d, scopeOf(exec));
+				if (pv) rememberUserVoice(d, pv.id, collectStrings(_result).join("\n"));
+			}
+		} catch { /* 证人池失败不该打断主流程 */ }
 		let reminder = null;
 		try {
 			reminder = observe(d, exec);
