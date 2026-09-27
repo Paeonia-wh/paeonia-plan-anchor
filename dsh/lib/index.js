@@ -77,11 +77,26 @@ let dbPath = "";
  * 那能处理「代码比库新」，但**处理不了「库比代码新」** ——
  * 那种情况下旧代码会按旧语义读新数据，**静默出错**（正是本项目最想消灭的失败模式）。
  */
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;   // v2：老 owner 认领（见 MIGRATIONS）
 
 /** 前向迁移表：[目标版本, 说明, 执行体]。按序执行 to > 当前版本 的条目。v1 是纯标记。 */
 const MIGRATIONS = [
 	[1, "启用 schema 版本闸门（纯标记，无结构变化）", () => {}],
+	[2, "老 owner（s1/s2… 进程内号，谁都匹配不上）认给「最近唯一在写它的稳定身份会话」", (d) => {
+		// 判据在台账里（session 列从稳定身份上线起就是 session-…）——**有据可依，不是猜**。
+		const legacy = d.prepare("SELECT id, title, owner FROM plans WHERE status='active' AND owner GLOB 's[0-9]*'").all();
+		let adopted = 0, skipped = 0;
+		for (const p of legacy) {
+			const rows = d.prepare("SELECT session FROM ledger WHERE plan_id=? AND session LIKE 'session-%' ORDER BY id DESC LIMIT 30").all(p.id);
+			const uniq = [...new Set(rows.map((r) => r.session))];
+			if (uniq.length === 1) {
+				d.prepare("UPDATE plans SET owner=? WHERE id=?").run(uniq[0], p.id);
+				try { log(d, "owner_adopted", { planId: p.id, ref: `${p.owner}→${uniq[0]}`, detail: `迁移 v2：老 owner「${p.owner}」谁都匹配不上；台账显示最近只有它在写这条计划 → 认给它`, session: uniq[0] }); } catch { /* 台账失败不该挡住迁移 */ }
+				adopted++;
+			} else { skipped++; }
+		}
+		if (adopted || skipped) console.log(`[plan-anchor] 迁移 v2：认领 ${adopted} 条老计划的 owner（${skipped} 条证据不足，留给用户裁决）`);
+	}],
 ];
 
 /**
@@ -2959,15 +2974,44 @@ function markAnswered(d, planId) {
 	if (stGet(d, planId, "ask_open", "") !== "1") return;
 	stDel(d, planId, "ask_open");
 	stSet(d, planId, "ask_answered", String(Number(stGet(d, planId, "ask_answered", "0")) + 1));
+	// 【可测性 · 2026-09-27】响应也**按日**记一笔：累计数永远不会因为改进而下降，
+	// 于是"这条错现在还错吗"答不出来。有了按日的数，近 7 天的变化才看得见。
+	{
+		// 【修】日期必须自带：上一版我沿用了别处的 `day`，而那是别的函数里的局部变量 ✗
+		// （一跑就抛 ReferenceError，发布仓 9 项当场失败）。日期格式与 asked:<日期> 保持一致。
+		const _day = new Date().toISOString().slice(0, 10);
+		const _k = `answered:${_day}`;
+		stSet(d, planId, _k, String(Number(stGet(d, planId, _k, "0")) + 1));
+	}
 }
 /** 遵守率的显示行（没问过就不显示）。 */
+/**
+ * 遵守率的显示行（没问过就不显示）。
+ * 【2026-09-27】同时给「累计」与「近 7 天」—— 因为**累计数永远不会因为改进而下降**，
+ * 光看它会得出"没变"的结论。判据（用户给的）：要能回答「原来那条错的，现在还错吗？」
+ * —— 近 7 天那一半才是答得出这个问题的数。
+ */
 function complianceLine(d, planId) {
 	const total = Number(stGet(d, planId, "ask_total", "0"));
 	if (!total) return "";
 	const ans = Number(stGet(d, planId, "ask_answered", "0"));
 	const open = stGet(d, planId, "ask_open", "") === "1";
 	const rate = total ? Math.round((ans / total) * 100) : 0;
-	return `📊 这条质问问过 ${total} 次，其中 ${ans} 次有响应（遵守率 ${rate}%）${open ? " —— **当前这一次还没回应**" : ""}`;
+	// 近 7 天窗口（按日键算）
+	let wAsked = 0, wAns = 0;
+	for (let i = 0; i < 7; i++) {
+		const day = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+		wAsked += Number(stGet(d, planId, `asked:${day}`, "0"));
+		wAns += Number(stGet(d, planId, `answered:${day}`, "0"));
+	}
+	const wRate = wAsked ? Math.round((wAns / wAsked) * 100) : 0;
+	// 【保守】前两段的措辞**逐字保持原样**（工具链/测试都在按原文匹配），
+	// 只在后面**追加**近期窗口 —— 改动最小、不破坏既有读法。
+	return `📊 这条质问问过 ${total} 次，其中 ${ans} 次有响应（遵守率 ${rate}%）`
+		+ `｜**近 7 天：问过 ${wAsked} 次、${wAns} 次有响应（${wRate}%）**`
+		+ (wAsked === 0 ? "（近 7 天没问过 —— 这本身就是改进的信号）" : "")
+		+ (open ? " —— **当前这一次还没回应**" : "")
+		+ "（累计数不会因改进而下降；要判断「改没改好」，看近 7 天那半。）";
 }
 
 function planNote(d, args, scope = "", session = "") {
@@ -3505,6 +3549,16 @@ function turnAnchorNotice(d, scope = "") {
 					"（问一次就够；他不回话的话，之后每 20 步会再轻提一次。）"
 				]
 					).join("\n"), "plan anchor (fresh session)" + (freshAskStyle === "neutral" ? " / neutral" : ""));
+			}
+			// 【2026-09-27 真机反馈】用户（会话）原话：「计划锚又问了那个计划的事（**这是第三次**）——
+			// 而你**已经回过两次**了」。机制：轻提是"前两回合各一次，之后每 20 步一次、**永远重提**" ✗
+			// → 反复举同一句会退化成墙纸。用户的判据是「**只在真的该问的时候问**」。
+			// 改法：前两回合照旧（防 agent 装没看见）；之后额外要求**计划状态真的变了**才再举一次。
+			if (Number(stGet(d, plan.id, "fresh_light_n", "0")) > 2) {
+				const _sig = anchorSignature(d, plan);
+				const _key = `fresh_light_sig:${CURRENT_SESSION}`;
+				if (stGet(d, plan.id, _key, "") === _sig) return null;   // 状态没变 → 不重复举
+				stSet(d, plan.id, _key, _sig);
 			}
 			const ln = Number(stGet(d, plan.id, "fresh_light_n", "0")) + 1;
 			stSet(d, plan.id, "fresh_light_n", String(ln));

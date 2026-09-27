@@ -16,7 +16,7 @@
  *      （空 = 断言"没有注入"会假通过，这是最危险的一类测试 bug）
  *   ② 关卡有先后：验收不匹配的闸门在"零工作痕迹"之前 → 测 I9 必须让证据措辞**对得上验收**
  */
-import { rmSync } from 'node:fs';
+import { rmSync, readFileSync } from 'node:fs';
 import { existsSync } from 'node:fs';
 // 可移植解析：开发布局（../dsh-plan-anchor）优先，否则用发布布局（../dsh）。
 // 照 tests/_test_plan_anchor.mjs 的同一写法 —— 公开仓库里别人也能直接跑。
@@ -213,7 +213,13 @@ section('⑥ 库结构闸门（#4）');
 // 注：「库领先就拦」那一支必须在**独立进程**里验 —— 本模块把 db 缓存在模块级变量上，
 // 同一个进程里没法二次 open。那一支见 verify-schema-guard.mjs。
 const uv = raw().prepare('PRAGMA user_version').get().user_version;
-check('新库/老库都被盖上结构版本戳（v1）', Number(uv) === 1, `实际 user_version=${uv}`);
+// 【2026-09-27】这条断言原来写死 v1 ✗ —— 加迁移（v2：老 owner 认领）后它必然失败。
+// 改成**跟着代码里的 SCHEMA_VERSION 走**：断言"库被盖上了当前版本的戳"，而不是"等于某个数字"。
+// 注意路径要**两种布局都认**（开发仓是 ./lib/index.js；发布仓是 dsh/lib/index.js —— 测试在 tests/ 下）。
+const _tryRead = (u) => { try { return readFileSync(u, 'utf8'); } catch { return ''; } };
+const _libText = _tryRead(new URL('./lib/index.js', import.meta.url)) || _tryRead(new URL('../dsh/lib/index.js', import.meta.url));
+const EXPECTED_SCHEMA = Number((_libText.match(/const SCHEMA_VERSION = (\d+);/) || [0, 0])[1]) || 1;
+check(`新库/老库都被盖上结构版本戳（v${EXPECTED_SCHEMA}）`, Number(uv) === EXPECTED_SCHEMA, `实际 user_version=${uv}，期望 ${EXPECTED_SCHEMA}`);
 
 // ─────────────────────────────────────────────────────────────────────────────
 section('⑦ 陈旧工件衰减（#3 · plan_gc）');
