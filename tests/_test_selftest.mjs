@@ -24,6 +24,7 @@ const LIB = (() => {
 	const dev = new URL('../dsh-plan-anchor/lib/index.js', import.meta.url);
 	return (existsSync(dev) ? dev : new URL('../dsh/lib/index.js', import.meta.url)).href;
 })();
+import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -61,7 +62,16 @@ const fire = async (agent, nm = 'read', args = { file_path: 'a.js' }) => {
 	let out = '';
 	for (const h of hooks.get('tools/post-execute') || []) {
 		const d = await h({ agent, name: nm, arguments: args }, {}, async () => ({ kind: 'continue' }));
-		for (const c of (d && d.additionalContexts) || []) out += (c.content || []).map((x) => x.text || '').join('');
+		for (const c of (d && d.additionalContexts) || []) {
+			// Native v4 rejects the retired { kind: 'plugin', plugin: ... } wrapper.
+			assert.equal(c.source?.kind, 'plugin:plan-anchor');
+			assert.equal(Object.hasOwn(c.source, 'plugin'), false);
+			assert.equal(c.source.form, 'notice');
+			assert.equal(typeof c.source.summary, 'string');
+			assert.equal(c.role, 'user');
+			assert.ok(c.id && c.content.length);
+			out += (c.content || []).map((x) => x.text || '').join('');
+		}
 	}
 	return out;
 };
@@ -273,6 +283,93 @@ check('老格式号的新鲜台账 → 仍判为"别人在动"（撞车不再骗
 await call(D, 'plan_note', { text: '自测：验证台账写入的是稳定身份' });
 const newestSession = raw().prepare('SELECT session FROM ledger WHERE plan_id=? ORDER BY id DESC LIMIT 1').get(activeId).session;
 check('台账写的是稳定身份（session-…），不再是进程内号', /^session-/.test(String(newestSession)), `实际写入：${newestSession}`);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Isolated scope: validate v4 attribution and preserve downstream hook results.
+const v4Cwd = CWD + "-v4";
+const owner = { session: { header: { cwd: v4Cwd, id: "session-v4-owner" } } };
+await call(owner, "plan_set", { title: "v4 fixture", steps: ["fixture work"] });
+for (const kind of ['continue', 'block']) {
+	const probe = { session: { header: { cwd: v4Cwd, id: `session-v4-${kind}` } } };
+	await say(probe, '继续');
+	const context = { role: 'user', source: { kind: 'plugin:other' }, content: [{ type: 'text', text: '下游提醒' }] };
+	const downstream = { kind, feedback: '下游反馈', additionalContexts: [context] };
+	let nextCalls = 0;
+	const hook = hooks.get('tools/post-execute')[0];
+	const result = await hook({ agent: probe, name: 'read', arguments: { file_path: 'a.js' } }, {}, async () => { nextCalls++; return downstream; });
+	assert.equal(nextCalls, 1);
+	assert.equal(result.kind, kind);
+	assert.equal(result.feedback, downstream.feedback);
+	assert.equal(result.additionalContexts.length, 2);
+	assert.equal(result.additionalContexts[1], context);
+	const reminder = result.additionalContexts[0];
+	assert.equal(reminder.source.kind, 'plugin:plan-anchor');
+	assert.equal(Object.hasOwn(reminder.source, 'plugin'), false);
+	assert.ok(reminder.source.summary && reminder.content[0].text);
+	assert.deepEqual(downstream.additionalContexts, [context]);
+	check(`v4 提醒兼容并保留下游 ${kind} 结果`, true);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+section('⑩ 同目录两个会话互不顶掉（问题 7 回归）');
+
+// 现场（另一个会话 2026-09-27 报的）：干到第 6 步时，同一目录的活跃计划被另一个会话换走 →
+//   plan_status 看得到、plan_step_done 一直报「没有生效计划」。
+// 根因：只有 withRefs 会设置"当前会话"，而 planStepDone/planNote/planAsk **不走 withRefs**
+//   → 它们拿**上一次调用留下的会话**去解析活跃计划 → 解析到别人的计划，或 null。
+// 本节判据直接抄报告里的验收：两个会话在同一目录各自立计划、各自 plan_step_done，
+//   都能写进去、互不影响。
+const S1 = { session: { header: { cwd: CWD, id: 'session-two-1' } } };
+const S2 = { session: { header: { cwd: CWD, id: 'session-two-2' } } };
+
+const planA1 = await call(S1, 'plan_set', { title: '会话一的线', reason: '自测：同目录双会话', steps: ['一的甲', '一的乙'] });
+// ⚠️ 这里**不能**传 replace:true —— 那会去取代"已存在的活跃计划"，
+// 在 S2 自己还没有计划时，被取代的就是 **S1 那条线**（探针实测），于是下面会假失败。
+// 探针也证实：同目录立第二条计划**不需要** replace，两条线各自 active、各有其主。
+const planB1 = await call(S2, 'plan_set', { title: '会话二的线', reason: '自测：同目录双会话', steps: ['二的甲', '二的乙'] });
+check('两个会话都能在同一目录立自己的计划', planA1.includes('会话一的线') && planB1.includes('会话二的线'),
+	`A=${planA1.slice(0, 60)} | B=${planB1.slice(0, 60)}`);
+
+await turn(S1, '干会话一的活');
+// 【关键】复现真正的 bug 窗口：先让 **S2 的钩子跑过**（它会改写"当前会话"），
+// 然后 S1 在**自己的钩子之前**就调 plan_step_done（本回合第一次工具调用）。
+// 修复前：它用 S2 的身份解析活跃计划 → 关到别人的步骤上（或报"没有生效计划"）。
+// 注：第一版测试在关步前又跑了一次 turn(S1)，钩子把"当前会话"纠正回来，于是**把 bug 掩盖了**
+//     —— 预修复版本也全过。测试要卡在窗口上，不能顺手把它补掉。
+await say(S2, '干会话二的活');
+const closeA = await call(S1, 'plan_step_done', { evidence: '一的甲做完了' });
+const closeB = await call(S2, 'plan_step_done', { evidence: '二的甲做完了' });
+check('会话一关得掉**自己**那步（不再"没有生效计划"/关到别人那步）', closeA.includes('已关闭') && closeA.includes('一的甲'), closeA.slice(0, 130));
+check('会话二关得掉**自己**那步', closeB.includes('已关闭') && closeB.includes('二的甲'), closeB.slice(0, 130));
+
+const twoLines = raw().prepare("SELECT p.title t, SUM(CASE WHEN s.status='done' THEN 1 ELSE 0 END) done FROM plans p JOIN steps s ON s.plan_id=p.id WHERE p.title IN ('会话一的线','会话二的线') GROUP BY p.id").all();
+const lineOne = twoLines.find((r) => r.t === '会话一的线'), lineTwo = twoLines.find((r) => r.t === '会话二的线');
+check('两条线的进度互不串（各 1 步 done）', lineOne && lineTwo && Number(lineOne.done) === 1 && Number(lineTwo.done) === 1, JSON.stringify(twoLines));
+
+// ─────────────────────────────────────────────────────────────────────────────
+section('⑪ 问题 4b / 5：按「额外 N」定位 + 陈旧泊位举手');
+
+// 【问题4b】主线步与额外步的 id 混在一条序列里，光有"额外第 N 条"推不出 id →
+// plan_goto 现在接受 detour_no，就地换算成 step_id。
+const G = { session: { header: { cwd: CWD, id: 'session-detour' } } };
+await call(G, 'plan_set', { title: '额外步定位样本', reason: '自测：问题4b', steps: ['主线甲', '主线乙'] });
+const dt = await call(G, 'plan_detour', { text: '顺手做一张宣传图', reason: '自测：问题4b', acceptance: '图出完' });
+check('开出一条额外步骤', dt.includes('已开一条额外步骤') || dt.includes('额外步骤'), dt.slice(0, 130));
+
+// 先切回主线（否则焦点本就在额外步上，跳过去看不出效果）
+const fullG = await call(G, 'plan_status', { detail: 'full' });
+const mainId = Number((fullG.match(/主线第 1 步\(id=(\d+)\)/) || [])[1] || 0);
+await call(G, 'plan_goto', { step_id: mainId, reason: '自测：先回主线' });
+const backToDetour = await call(G, 'plan_goto', { detour_no: 1, reason: '自测：按额外编号切回去' });
+check('按「额外 1」能直接定位（不用先查 id）', backToDetour.includes('焦点已切到') && /额外步骤 ?1/.test(backToDetour), backToDetour.slice(0, 160));
+const badDetour = await call(G, 'plan_goto', { detour_no: 99, reason: '自测：不存在的额外步' });
+check('不存在的额外编号 → 明确报错并指路', badDetour.includes('没有『额外步骤 99』') && badDetour.includes('plan_status'), badDetour.slice(0, 160));
+
+// 【问题5】泊位只进不出 → 挂太久的要主动举手（仿"回程票"那套）
+await call(G, 'plan_discover', { text: '一条挂了很久的欠账', disposition: 'defer', resume_when: '以后再说' });
+raw().prepare("UPDATE parking SET created_at = created_at - 5*86400000 WHERE plan_id = (SELECT id FROM plans WHERE title='额外步定位样本')").run();
+const staleMsg = await call(G, 'plan_status', {});
+check('挂了超 3 天的泊位 → 主动举手并说清怎么关', /挂了超过 3 天/.test(staleMsg) && staleMsg.includes('plan_close'), staleMsg.slice(0, 220));
 
 // ─────────────────────────────────────────────────────────────────────────────
 console.log('════════ plan-anchor 自测套 ════════');

@@ -1061,6 +1061,20 @@ function integrityLine(d) {
  * 生成锚点简报。这是所有 plan_* 工具返回给模型的东西，
  * 也是漂移提醒注入的内容。要求：短、具体、带编号、带明确下一步。
  */
+/**
+ * 【问题5 · 2026-09-27】挂了很久还没关的泊位。
+ * 现场：泊位 13 条，逐条核对发现 **7 条其实早就做完了**，只是没人去关 ——
+ * 而它自己的文档里写着"泊位只进不出，会让清单烂掉"。
+ * 修法：仿它自己做得好的「回程票」机制 —— 挂太久的主动举一次手，并说清怎么关。
+ */
+const PARK_STALE_DAYS = 3;
+function staleParking(d, plan) {
+	const cutoff = Date.now() - PARK_STALE_DAYS * 86400000;
+	try {
+		return d.prepare("SELECT id FROM parking WHERE plan_id=? AND status='parked' AND created_at < ? ORDER BY id").all(plan.id, cutoff);
+	} catch { return []; }
+}
+
 function anchorText(d, plan, opts = {}) {
 // 【C · 2026-09-25】默认给短版：锚的职责是"把计划放回眼前"，不是"把计划全文搬一遍"。
 // 要全文（只有 plan_status detail:"full" 需要）→ 显式传 { brief: false }。
@@ -1111,6 +1125,9 @@ const brief = opts.brief !== false;
 
 	if (park.length) {
 		lines.push(brief ? `🅿 泊位 ${park.length} 条未处理（看清单用 plan_park）` : `🅿 泊位 ${park.length} 条未处理（一律先入泊，不要现在追；要看内容用 plan_park）`);
+		// 【问题5】顺手把"挂太久没关的"举一次手（做完的用 plan_close 关掉，别让清单烂掉）
+		const _stalePark = staleParking(d, plan);
+		if (_stalePark.length) lines.push(`🅿 其中 ${_stalePark.length} 条挂了超过 ${PARK_STALE_DAYS} 天没动 —— 逐条过一眼：做完的用 plan_close 关掉（计划 #${plan.id}）`);
 	} else {
 		lines.push("🅿 泊位空。");
 	}
@@ -2050,6 +2067,14 @@ function planGoto(d, args, scope = "") {
 	const reason = (args.reason || "").trim();
 	if (!reason) return { ok: false, reason: "reason 必填：为什么现在要改焦点。无理由的跳步会被记进漂移台账。", briefing: anchorText(d, plan) };
 	const cur = currentStep(d, plan.id);
+	// 【问题4b · 2026-09-27】支持按「额外 N」直接定位：
+	// 主线步与额外步的 id 混在一条序列里（主线 212-220、额外 221 起），光有 detour_no 推不出 id。
+	// 这里就地换算成 step_id，后面所有逻辑不用改。
+	if (args.detour_no !== undefined && !args.step_id && !args.park_id) {
+		const _ds = d.prepare("SELECT id FROM steps WHERE plan_id=? AND kind='detour' AND detour_no=?").get(plan.id, Number(args.detour_no));
+		if (!_ds) return { ok: false, reason: `没有『额外步骤 ${args.detour_no}』—— 用 plan_status 看额外步骤清单（每行都带 id=…）`, briefing: anchorText(d, plan) };
+		args = { ...args, step_id: _ds.id };
+	}
 
 	if (args.park_id) {
 		const p = d.prepare("SELECT * FROM parking WHERE id=?").get(Number(args.park_id));
@@ -3299,6 +3324,12 @@ const ANCHOR_STALE_AT = 3;
  * （同一套思路 plan_mute 早就有了：静音有上限、到期温和 check-in。这里当时没复用，是失误。）
  */
 const ANCHOR_ACK_TTL = 5;
+/**
+ * 【问题2 · 2026-09-27】问过之后的冷却回合数。
+ * 实测数据：它自己统计的"问过 39 次、19 次有响应（49%）"—— 一条天天响而没人理的提醒是**负成本**，
+ * 因为它教人无视提醒。所以：问过一次就歇几回合，别每回合都举。
+ */
+const ANCHOR_ASK_COOLDOWN = 8;
 
 /** 回合锚：每个用户回合的第一次工具调用后，把计划放回眼前。**内容会自适应：变了给全的，没变缩短，一直没变就质问。** */
 function turnAnchorNotice(d, scope = "") {
@@ -3460,6 +3491,32 @@ function turnAnchorNotice(d, scope = "") {
 				);
 			}
 			// 【豁免到期】重新问，而且问得更重 —— 因为"声明在轨这么久、计划却一步没动"本身就可疑
+			// 【问题2+6 · 2026-09-27】问得太频繁 + 记账应当自动 —— 两道闸：
+			//   ① **冷却**：刚问过就在冷却里，不再每回合都问；
+			//   ② **自动在轨**：还没到升级档（escalateAt）时，判断为"你在干活、只是没入库"——
+			//      自动视为在轨并记一笔台账。**记账自动发生，不必专门说一句话**。
+			//      （到升级档还不入库，才真的问 —— 那时"漂太久了"是可陈述的事实，不是噪音。）
+			const _cd = Number(stGet(d, plan.id, "anchor_ask_cd", "0"));
+			if (_cd > 0) {
+				stSet(d, plan.id, "anchor_ask_cd", String(_cd - 1));
+				return notice(`【计划锚】${plan.title}｜${doneN}/${steps.length} 步${cur ? `｜${stepLabel(cur)}` : ""}（上一条提醒已发出 · 冷却中还剩 ${_cd} 回合）`, "plan anchor (ask cooldown)");
+			}
+			// 【问题6 · 2026-09-27 修正版】自动记账**看证据、不看预算**：
+			//   只有这一步**声明了 scope**、且最近动作**都在范围内、无越界**时，才自动视为在轨。
+			//   为什么不能"看预算"：第一版写成 budget < escalateAt 就自动放行 —— 把**该问的那次也吞掉了**
+			//   （发布仓测试 58「豁免到期→重新问，不会永久失明」当场 3 项 FAIL）。
+			//   为什么要有条件：不声明 scope 的步骤若也自动放行，等于"漂了也自动放行"，护栏就废了。
+			const _vs = verdictStats(d, plan.id, cur ? cur.id : 0);
+			const _inScope = Number(_vs["match"] || 0);
+			const _offScope = Number(_vs["out-of-scope"] || 0) + Number(_vs["read-outside"] || 0);
+			if (cur && _inScope > 0 && _offScope === 0 && stGet(d, plan.id, "auto_track_sig", "") !== sig) {
+				stSet(d, plan.id, "auto_track_sig", sig);
+				markFresh(d, plan.id);
+				log(d, "auto_on_track", { planId: plan.id, stepId: cur.id, detail: `自动在轨：本步声明了 scope，最近 ${_inScope} 次动作都在范围内（无越界），不追问` });
+				stSet(d, plan.id, "anchor_ack_sig", sig);
+				stSet(d, plan.id, "anchor_ack_age", "0");
+				return notice(`【计划锚】${plan.title}｜${doneN}/${steps.length} 步｜${stepLabel(cur)}（自动视为在轨：本步动作都在声明的范围内）`, "plan anchor (auto on-track)");
+			}
 			stDel(d, plan.id, "anchor_ack_sig");
 			stDel(d, plan.id, "anchor_ack_age");
 		// 【漏改修复】这里也必须看「还有没有活可干」—— 我今晚只在质问分支加了判断，
@@ -3468,6 +3525,7 @@ function turnAnchorNotice(d, scope = "") {
 		const pendingWork2 = d.prepare("SELECT COUNT(*) c FROM steps WHERE plan_id=? AND kind='plan' AND status!='done'").get(plan.id).c;
 		if (!pendingWork2) return null;
 		markWarnUnanswered(d, plan.id);
+		stSet(d, plan.id, "anchor_ask_cd", String(ANCHOR_ASK_COOLDOWN));   // 【问题2】问过就歇几回合
 			// 【计划遵守率】记一笔"质问发出"（可测量的事实，不是印象）
 			stSet(d, plan.id, "ask_total", String(Number(stGet(d, plan.id, "ask_total", "0")) + 1));
 			stSet(d, plan.id, "ask_open", "1");
