@@ -531,6 +531,41 @@ const bkOwner = await fire(BK1, 'write');
 check('（正对照）自己的线上，记账提醒照响', /记账提醒/.test(bkOwner), bkOwner.slice(0, 220));
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+section('⑱ 不立计划就拦动手（pre-execute + ask —— 按宿主官方选择规则）');
+
+// 官方依据（宿主 docs/cookbook/adding-a-tool.md「Execution policy and observation」）：
+//   「别把部署策略做进工具里。用 tools/pre-execute 做可扩展的 allow/deny/ask 策略」
+//   「guard() 只用于后续监听者无法撤销的最终单调拒绝」（那是给不变量的 ✗，不是给策略的 ✓）
+//   「用最弱的、够用的机制」「需要等待的决定（比如问用户）就从 pre-execute 返回 ask」
+// 分级：第 1 次改文件不说 → 第 2 次轻劝（原有 noPlanNudge ✓）→ 第 3 次**升级问用户** ✓
+const preGate = async (ag, toolName) => {
+	for (const h of hooks.get('tools/pre-execute') || []) {
+		const r = await h({ agent: ag, name: toolName, arguments: {} }, async () => ({ kind: 'allow' }));
+		if (r && r.kind && r.kind !== 'allow') return r;
+	}
+	return { kind: 'allow' };
+};
+const EF = { session: { header: { cwd: CWD + '-enforce', id: 'session-ef-noplan' } } };
+// ⚠️ 计数口径：noPlanWrites 记的是**已完成**的改文件次数；pre-execute 里 +1 = **这一次**。
+//    所以「第 3 次改文件」= 已完成 2 次 + 这一次 → 断言要卡在这个位置（第一版我提前一格 ✗）。
+await fire(EF, 'write');                 // 已完成 1 次
+const g1 = await preGate(EF, 'write');   // 这一次是第 2 次 → 未到阈值 ✓
+check('还没到阈值 → 不升级（前几次只轻劝）', g1.kind === 'allow', JSON.stringify(g1).slice(0, 140));
+await fire(EF, 'write');                 // 已完成 2 次
+const g3 = await preGate(EF, 'write');   // 这一次是第 3 次 → 升级 ✓
+check('第 3 次改文件且无计划 → 升级为 ask（问用户，不是拦死）', g3.kind === 'ask', JSON.stringify(g3).slice(0, 200));
+check('升级语自带出口（立计划 / 说清这是一次性活）', /plan_set/.test(String(g3.reason)) && /一次性活/.test(String(g3.reason)), String(g3.reason).slice(0, 240));
+const g4 = await preGate(EF, 'write');
+check('每会话只升一次（第 4 次不再问，免得变墙纸）', g4.kind === 'allow', JSON.stringify(g4).slice(0, 120));
+const gRead = await preGate(EF, 'read');
+check('只读工具一律放行', gRead.kind === 'allow', JSON.stringify(gRead).slice(0, 120));
+const EP = { session: { header: { cwd: CWD + '-enforce2', id: 'session-ef-plan' } } };
+await call(EP, 'plan_set', { title: '有计划样本', reason: '自测：不拦有计划的人', steps: ['甲', '乙'] });
+for (let i = 0; i < 5; i++) await fire(EP, 'write');
+const gp = await preGate(EP, 'write');
+check('（正对照）有自己计划 → 永远放行', gp.kind === 'allow', JSON.stringify(gp).slice(0, 140));
+
 console.log('════════ plan-anchor 自测套 ════════');
 console.log(results.join('\n'));
 console.log(`\n合计：${pass} 过 / ${fail} 失败`);

@@ -4020,6 +4020,10 @@ let detourBudget = 3;
 let refuseCap = 5;
 let scopeMode = "observe";
 let completionGate = true;
+let enforcePlan = "ask";        // off | ask | deny —— 「不立计划就拦动手」的升级点（默认问用户 ✓）
+let enforceAfter = 3;           // 改了 N 次文件还没计划 → 升级（前 N-1 次只轻劝 ✓）
+const enforceAsked = new WeakMap();   // 每会话只升一次 ✓（免得变成墙纸）
+const enforceFuse = new WeakMap();    // 熔断：一个会话最多升 3 次 ✓（绝不把人锁死）
 let noPlanNudge = true;
 let muteCap = 120;
 let askBudget = 5;
@@ -4042,6 +4046,38 @@ const anchorAfterCompact = new WeakSet();
  * 且**第 2 次**才提醒、**每会话只提醒一次**，这样一次性小改不会触发，真在干活才会被看见。
  */
 const noPlanWrites = new WeakMap();
+
+/**
+ * 【不立计划就拦动手 · 2026-09-27】分级里的升级点。
+ * 官方选择规则：策略（allow/deny/ask）走 `tools/pre-execute` ✓；`guard()` 是给不变量的 ✗ 不用。
+ * 返回 null = 放行（交给 next() ✓）；返回 { kind: "ask" } = 问用户 ✓；缺审批支持时宿主会把它退化成拒绝 ✓，
+ * 所以 reason 里必须自带出口（立计划 / 说清这是一次性活）✓。
+ */
+function enforcementGate(d, exec) {
+	if (enforcePlan === "off" || !exec || !exec.agent) return null;
+	if (!isFileMutating(String(exec.name || ""))) return null;   // 只盯会改文件的 ✓ 只读一律放行 ✓
+	const agent = exec.agent;
+	if (enforceAsked.get(agent)) return null;                    // 每会话只升一次 ✓
+	if ((enforceFuse.get(agent) || 0) >= 3) return null;         // 熔断 ✓
+	const n = (noPlanWrites.get(agent) || 0) + 1;                // 这一次就是第 n 次改文件
+	if (n < enforceAfter) return null;                           // 前几次只轻劝（原来那套照旧 ✓）
+	const scope = scopeOf(exec);
+	if (activePlan(d, scope, sessionKeyOf(agent))) return null;   // 已经有计划 → 放行 ✓
+	enforceAsked.set(agent, true);
+	enforceFuse.set(agent, (enforceFuse.get(agent) || 0) + 1);
+	log(d, "enforce_plan_gate", { ref: `第 ${n} 次改文件`, detail: `工具 ${exec.name}：本会话改了 ${n} 次文件仍无计划 → ${enforcePlan}` });
+	const reason = [
+		`⏸ 你已经改了 ${n} 次文件，但**这个目录里没有你的计划** —— 所以先停一下问你：`,
+		"",
+		"这次是**多步活**吗？",
+		"   · 是 → 用 `plan_set` 把步骤写下来（好处：计划不会忘、冒出来的问题有处放；代价：会多几次记录动作）",
+		"   · 不是（一次性改一下就完）→ 直接说一句「这是一次性活，不用计划」，我立刻继续 ✓",
+		"   · 你不确定 → 用 `ask_user_question` 问用户（这属「超出已批准范围」，是必问档）",
+		"",
+		"（这条只在你**真要动手**时出现，每会话至多一次 —— 出发点是：计划锚用不用，不该全看 agent 自觉。）",
+	].join("\n");
+	return enforcePlan === "deny" ? { kind: "deny", reason } : { kind: "ask", reason };
+}
 /** 【缺口修补】本会话的用户回合数：纯讨论/规划阶段一个工具都不调，只能在「终于动手」那一刻补课。 */
 const discussTurns = new WeakMap();
 /** 【第一轮就问】会话第一轮 + 没有计划 → 提示"要不要启用计划锚"（最早的介入点，与轮数兜底成双保险）。 */
@@ -4381,6 +4417,10 @@ function apply(ctx, config) {
 	scopeMode = String(config.scopeMode ?? "observe");
 	completionGate = config.completionGate !== false;
 	noPlanNudge = config.noPlanNudge !== false;
+	// 【不立计划就拦动手 · 2026-09-27】分级里的"升级点"：劝不动就问用户（官方推荐用 pre-execute + ask ✓）
+	enforcePlan = String(config.enforcePlan || "ask");
+	if (!["off", "ask", "deny"].includes(enforcePlan)) throw new Error(`plan-anchor: invalid enforcePlan ${enforcePlan}`);
+	enforceAfter = Math.max(1, Number(config.enforceAfter ?? 3));   // 改了几次文件才升级（默认 3）
 	liveWindowMs = Number(config.liveWindowMinutes ?? 60) * 60 * 1000;
 	if (!Number.isFinite(liveWindowMs) || liveWindowMs <= 0) throw new Error(`plan-anchor: invalid liveWindowMinutes ${config.liveWindowMinutes} — must be a positive number`);
 	freshAskStyle = String(config.freshAskStyle ?? "directive");
@@ -4703,6 +4743,14 @@ function apply(ctx, config) {
 	});
 
 	// ——— 回合边界：标记"本回合还没注入过锚"———
+	// 【不立计划就拦动手 · 2026-09-27】策略层（官方指定用 pre-execute 做 allow/deny/ask ✓，不用 guard ✗）。
+	// waterfall 规矩：不接管这次决定时必须 `return next()` ✓。
+	ctx.on("tools/pre-execute", async (exec, next) => {
+		const gate = enforcementGate(d, exec);
+		if (gate) return gate;
+		return next();
+	});
+
 	ctx.on("agent/pre-step", ({ agent, messages }, next) => {
 		// 【缺口 1 修复】钩子路径不走 withRefs，所以这里的 CURRENT_SESSION 原本是空串 →
 		// activePlan 退回"目录唯一一条" → **多会话并存时，锚会显示到别人的计划**
