@@ -405,6 +405,20 @@ function activePlan(d, scope = "", owner = CURRENT_SESSION) {
 	return all.length === 1 ? all[0] : null;
 }
 
+/**
+ * 【真机现场 · 2026-09-27】这条计划是不是"我的活"？
+ * 借用（owner 明确且不是本会话）时：不渲染成"你正在做"、不催、也**不替别人记预算**。
+ * 真机现场：另一个会话被告知"你正在做主线第 9 步"（那条计划是别人的），
+ * 而它的漂移预算涨到 138/12 —— 因为预算按**计划**存，所有会话的调用都加在同一条上。
+ * 无主（老计划）或拿不到会话 → 一律当作可用（退回老行为）。
+ */
+function isMine(plan) {
+	if (!plan) return false;
+	if (!plan.owner) return true;
+	if (!CURRENT_SESSION) return true;
+	return plan.owner === CURRENT_SESSION;
+}
+
 /** 本目录下**别人的**活跃计划（用于"还有 N 条别的计划"的提示）。 */
 function otherActivePlans(d, scope, owner) {
 	return d.prepare("SELECT * FROM plans WHERE status='active' AND scope=? AND owner!=? ORDER BY id DESC").all(scope, owner || "");
@@ -863,7 +877,18 @@ function budget(d, planId) {
 function setBudget(d, planId, n) {
 	stSet(d, planId, "budget", Math.max(0, n));
 }
+/**
+ * 【真机现场 · 2026-09-27】静音**按会话**存（原来按计划存 ✗）。
+ * 现场原话：「我先把提醒静音（**只静音，不碰那条计划**）」—— 而它其实碰了：
+ * 按计划存的静音会把**别的会话**的提醒一起静掉，那是跨会话的连带伤害。
+ * 老键（"mute"）只作只读兜底：不迁移、不再写。
+ */
+/** 静音的键：有会话 → 按会话（只静自己）；没会话 → 退回老键（按计划，与老行为一致）。 */
+const muteKey = () => (CURRENT_SESSION ? `mute:${CURRENT_SESSION}` : "mute");
+
 function muteLeft(d, planId) {
+	const mine = Number(stGet(d, planId, muteKey(), "0"));
+	if (mine > 0) return mine;
 	return Number(stGet(d, planId, "mute", "0"));
 }
 
@@ -3295,7 +3320,7 @@ function planMute(d, args, scope = "") {
 		};
 	}
 	const n = Math.max(1, Math.min(muteCap, Number(args.calls ?? 20)));
-	stSet(d, plan.id, "mute", n);
+	stSet(d, plan.id, muteKey(), n);
 	stSet(d, plan.id, "mute_pending_checkin", "1");
 	log(d, "mute", { planId: plan.id, ref: `${n} 次调用`, detail: reason });
 	return {
@@ -3512,6 +3537,10 @@ function turnAnchorNotice(d, scope = "") {
 	}
 
 	// —— 自适应（①）：指纹没变就别说同样的话 ——
+	// 【真机现场 · 2026-09-27】这条计划不是我的活 → **不要**渲染成"你正在做主线第 N 步"。
+	// 现场原话：「它说"你正在做主线第 9 步"，而那条计划是别的会话的，且它上一条提醒刚说过
+	//   "不是你的活"。两句话自相矛盾。」—— E 分支已经负责"问一次要不要接手"，之后就该安静。
+	if (!isMine(plan)) return null;
 	const sig = anchorSignature(d, plan);
 	const prevSig = stGet(d, plan.id, "anchor_sig", "");
 	const n = prevSig === sig ? Number(stGet(d, plan.id, "anchor_sig_n", "0")) + 1 : 1;
@@ -4568,7 +4597,8 @@ function observe(d, exec) {
 	const plan = activePlan(d, scope);
 	const toolName = exec.name;
 	// 【计划新鲜度】每次工具调用 +1（入库动作会清零）—— 单位与论文一致
-	if (plan && plan.id) bumpFreshness(d, plan.id);
+	// 【真机现场】不是我这条线就不记我的账（老账：多会话共用一条计划 → 预算涨到 138/12）
+	if (plan && plan.id && isMine(plan)) bumpFreshness(d, plan.id);
 	// 没立计划时：默认完全不打扰（单步任务不该被啰嗦）。
 	// 但**改文件两次以上就该被看见**（学自 Task-Anchor 的 "No code without a lock"）——
 	// 这是我文档里承认过的边界一（"不调工具直接干活，护栏完全看不见"）目前唯一能补的部分。
@@ -4619,10 +4649,12 @@ function observe(d, exec) {
 		// 但也不能算 0 —— 真跑偏时同样经常是"读个不停"，所以是折中的半次。
 		// 【等待期间不涨预算】—— 四处文案都写着"等外部不是你的错"，那代码里就得**真的**不涨。
 		// （之前只写在描述里没落到代码，是"说了没做"。）
+		if (isMine(plan)) {   // 【真机现场】不是我这条线，不记我的账、也不催我
 		if (!stGet(d, planId, "waiting_what", "")) {
 			setBudget(d, planId, budget(d, planId) + (READ_ONLY_TOOLS.has(toolName) ? 0.5 : 1));
 		}
 		stSet(d, planId, "step_calls", workTrace(d, planId).calls + 1); // 本步工作痕迹（I9 判据之一）
+		}   // 【真机现场】以上"记我的账"只在 isMine 时做
 	}
 
 	// ①b scope 判决：只判"声明了 scope 的当前主线步骤"
@@ -4712,7 +4744,7 @@ function observe(d, exec) {
 	const ml = muteLeft(d, planId);
 	if (ml > 0) {
 		const left = ml - 1;
-		stSet(d, planId, "mute", left);
+		stSet(d, planId, muteKey(), left);
 		if (left === 0 && stGet(d, planId, "mute_pending_checkin", "") === "1") {
 			stDel(d, planId, "mute_pending_checkin");
 			setBudget(d, planId, 0);

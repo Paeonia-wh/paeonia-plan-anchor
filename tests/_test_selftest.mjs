@@ -404,6 +404,28 @@ const okClose2 = await call(RT, 'plan_step_done', { evidence: 'R2 也纯讨论�
 check('换一条属于本步的依据 → 正常放行（不误伤）', okClose2.includes('已关闭') && okClose2.includes('第 2 步'), okClose2.slice(0, 130));
 
 // ─────────────────────────────────────────────────────────────────────────────
+section('⑬ 借来的计划：不说"你正在做"、不催、不替别人记预算（真机现场）');
+
+// 现场原话（另一个会话）：「它说"你正在做主线第 9 步"，而那条计划是别的会话的，
+//   且它上一条提醒刚说过"不是你的活"。**两句话自相矛盾**。」＋「漂移预算已经 138/12 了」。
+const BO = { session: { header: { cwd: CWD + '-borrow', id: 'session-borrow-owner' } } };
+await call(BO, 'plan_set', { title: '借来的线', reason: '自测：借来的计划', steps: ['甲', '乙', '丙'] });
+const BX = { session: { header: { cwd: CWD + '-borrow', id: 'session-borrow-other' } } };
+
+const firstBorrow = await turn(BX, '你好');
+check('第一次会说清"不是本会话的"（E 分支）', /不是本会话|别的会话/.test(firstBorrow), firstBorrow.slice(0, 150));
+
+const secondBorrow = await turn(BX, '继续');
+check('**不再**出现「你正在做 / ⚙ 在做」那种自相矛盾的说法', !/你正在做|⚙ 在做/.test(secondBorrow), secondBorrow.slice(0, 180));
+check('也不催（借来的计划不该催到不相干的会话头上）', !secondBorrow.includes('回合没有任何变化'), secondBorrow.slice(0, 160));
+
+const budgetOf = () => Number((raw().prepare("SELECT value FROM plan_state WHERE plan_id=(SELECT id FROM plans WHERE title='借来的线') AND key='calls_since_update'").get() || {}).value || 0);
+const beforeB = budgetOf();
+for (let i = 0; i < 15; i++) await turn(BX, '继续');
+const afterB = budgetOf();
+check('借来的计划不替我记预算（不会涨成 138/12）', afterB === beforeB, `前 ${beforeB} → 后 ${afterB}`);
+
+// ─────────────────────────────────────────────────────────────────────────────
 console.log('════════ plan-anchor 自测套 ════════');
 console.log(results.join('\n'));
 console.log(`\n合计：${pass} 过 / ${fail} 失败`);
