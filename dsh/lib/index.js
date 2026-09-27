@@ -204,6 +204,12 @@ function open(config) {
 		mkdirSync(dirname(config.path), { recursive: true });
 		db = new DatabaseSync(config.path);
 		db.exec("PRAGMA journal_mode = WAL");
+		// 【并发加固 · 2026-09-27 真机发现】WAL 只保证"能并发读"；**写入撞车时如果不设 busy_timeout，
+		// SQLite 会立刻抛 SQLITE_BUSY** ✗ —— 真机上两个 DSH 进程**同时启动**时，
+		// 一个会话当场崩了（退出码 1、库里零足迹），另一个正常；第二次没复现（属竞态）。
+		// 补上超时：撞车就等一等（最多 5 秒），而不是直接失败。
+		// 场景依据：库是**多进程共享**的（桌面版 + 我起来的 headless 会话都连同一个 plan.db）。
+		try { db.exec("PRAGMA busy_timeout = 5000"); } catch { /* 老库不支持也无妨 */ }
 		db.exec(`
 			CREATE TABLE IF NOT EXISTS plans (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
