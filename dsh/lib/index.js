@@ -362,7 +362,13 @@ function stableIdOf(agent) {
 const agentKeys = new WeakMap();
 let agentSeq = 0;
 function sessionKeyOf(agent) {
-	{ const _sid = stableIdOf(agent); if (_sid) CURRENT_SESSION_ID = _sid; }   // 【稳定身份】顺手记下
+	// 【2026-09-27 真机复现后修】身份必须**跨进程稳定**：
+	//   原来这里返回进程内自增号（s1/s2…），而它被当作 plan.owner 的持久键 ——
+	//   于是**另一个进程/重启后的会话**拿到同一个号 → 被当成"同一个会话" →
+	//   判定"这不是别人的计划" → 新会话立计划时**静默取代**别人的（真机实测复现）。
+	//   改成：优先返回 agent.session.header.id（跨重启不变）；取不到才退回自增号。
+	const _sid = stableIdOf(agent);
+	if (_sid) { CURRENT_SESSION_ID = _sid; return _sid; }
 	if (!agent || typeof agent !== "object") return "";
 	if (!agentKeys.has(agent)) agentKeys.set(agent, `s${++agentSeq}`);
 	return agentKeys.get(agent);
@@ -1207,7 +1213,10 @@ function planSet(d, args, scope = "", session = "") {
 			].join("\n")
 		};
 	}
-	const _otherSession = !!(prev && prev.owner && session && prev.owner !== session);
+	// 【2026-09-27 真机复现后修】原来要求 prev.owner 存在才算"别人的" ——
+	// 于是**没有 owner 的旧计划**被判成"我自己的"，新会话一立计划就把它静默取代 ✗
+	// 现在：只要 owner 与我不同（含空 owner）就算别人的 → 并存，不静默动它。
+	const _otherSession = !!(prev && session && prev.owner !== session);
 	if (_otherSession && !args.replace) {
 		prev = null;                    // 不动别人的 → 并存
 	} else if (_otherSession && args.replace) {
@@ -4150,7 +4159,7 @@ function apply(ctx, config) {
 				title: { type: "string", required: true, description: "计划标题（这次要做成什么）" },
 				steps: { type: "array", required: true, items: { type: "json" }, description: "有序步骤数组。每项可以是字符串，也可以是对象 {text, acceptance, files, commands}；acceptance=怎么做才算做完，files/commands=这一步允许动什么（供 scope 判决）" },
 				reason: { type: "string", description: "覆盖已有计划时的理由（首次立计划可省略）" },
-				replace: { type: "boolean", description: "要取代**已经存在的**活跃计划时必填 true（本会话的或别的会话的都算）。不填会被拒绝 —— 取代是允许的，**静默**作废不是。" },
+				replace: { type: "boolean", description: "只有要**整条取代**当前生效的计划时才传（会在台账里记为显式取代）。**不传就是并存**：同目录里别的会话的计划不受任何影响，你只是多立一条自己的线 —— 所以同目录多会话各自立计划时，直接调、不要传它。" },
 				carry: { type: "array", items: { type: "json" }, description: "换计划时的显式映射：[{from_step_id, to_index, relation, note}]，relation ∈ kept（保留并继承完成状态）| replaced（取代=返工，旧的做错了）| split（拆分）| merged（合并）。不写映射而旧步已完成 → 回执会把它吼出来" }
 			},
 			exec: (a, x) => withRefs(d, a, scopeOf(x), (dd, aa, sc) => planSet(dd, aa, sc, sessionKeyOf(x && x.agent)))
