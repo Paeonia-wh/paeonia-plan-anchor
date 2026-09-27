@@ -77,7 +77,7 @@ let dbPath = "";
  * 那能处理「代码比库新」，但**处理不了「库比代码新」** ——
  * 那种情况下旧代码会按旧语义读新数据，**静默出错**（正是本项目最想消灭的失败模式）。
  */
-const SCHEMA_VERSION = 2;   // v2：老 owner 认领（见 MIGRATIONS）
+const SCHEMA_VERSION = 3;   // v2：老 owner 认领（见 MIGRATIONS）
 
 /** 前向迁移表：[目标版本, 说明, 执行体]。按序执行 to > 当前版本 的条目。v1 是纯标记。 */
 const MIGRATIONS = [
@@ -96,6 +96,31 @@ const MIGRATIONS = [
 			} else { skipped++; }
 		}
 		if (adopted || skipped) console.log(`[plan-anchor] 迁移 v2：认领 ${adopted} 条老计划的 owner（${skipped} 条证据不足，留给用户裁决）`);
+	}],
+	[3, "再认一批老 owner：判据 A 创建者 / 判据 B 压倒性写入者（都记台账、都留数字）", (d) => {
+		const legacy = d.prepare("SELECT id, title, owner FROM plans WHERE status='active' AND owner GLOB 's[0-9]*'").all();
+		let a = 0, b = 0, skipped = 0;
+		for (const p of legacy) {
+			// 判据 A：创建行的 session（定义上属主就是建它的会话）
+			const born = d.prepare("SELECT session FROM ledger WHERE plan_id=? AND kind='plan_set' ORDER BY id LIMIT 1").get(p.id);
+			const bornId = born && /^session-/.test(String(born.session || "")) ? born.session : "";
+			if (bornId) {
+				d.prepare("UPDATE plans SET owner=? WHERE id=?").run(bornId, p.id);
+				try { log(d, "owner_adopted", { planId: p.id, ref: `${p.owner}→${bornId}`, detail: `迁移 v3·判据A（创建者）：第一条 plan_set 台账行就是它 → 认给它`, session: bornId }); } catch {}
+				a++; continue;
+			}
+			// 判据 B：压倒性写入者（头名 ≥70% 且 ≥10 条）
+			const w = d.prepare("SELECT session, COUNT(*) n FROM ledger WHERE plan_id=? AND session LIKE 'session-%' GROUP BY session ORDER BY n DESC").all(p.id);
+			const totalRows = w.reduce((s, r) => s + Number(r.n), 0);
+			const top = w[0];
+			if (top && totalRows >= 10 && Number(top.n) / totalRows >= 0.7) {
+				d.prepare("UPDATE plans SET owner=? WHERE id=?").run(top.session, p.id);
+				try { log(d, "owner_adopted", { planId: p.id, ref: `${p.owner}→${top.session}`, detail: `迁移 v3·判据B（压倒性写入者）：${top.n}/${totalRows} 条（${Math.round(Number(top.n) / totalRows * 100)}%）`, session: top.session }); } catch {}
+				b++; continue;
+			}
+			skipped++;
+		}
+		if (a || b || skipped) console.log(`[plan-anchor] 迁移 v3：按创建者认领 ${a} 条、按压倒性写入者认领 ${b} 条（${skipped} 条证据不足，留给人裁）`);
 	}],
 ];
 
