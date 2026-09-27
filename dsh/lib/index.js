@@ -1700,6 +1700,32 @@ function planStepDone(d, args, scope = "", session = "") {
 	};
 
 	// 【强制点·N=1】提醒被无视 → 不许宣布完成
+
+	// 【重试陷阱 · 2026-09-27 真机发现】本工具关的是"当前步" —— 上一次调用**其实成功了**时，
+	// 当前步已顺延到下一步 → "重试"会**把下一步也关掉**，还写着同一条依据（不会报错，只会在账上多一条不实依据）。
+	// 真机实测：plan#38 的第 1、2 步被同一条「A1 已验证」先后关掉，且两步之间零动作。
+	// 判据（三条同时成立才拦，机械、不猜语义）：① 上一条主线步已 done；② 依据与它逐字相同；③ 两步之间零工作痕迹。
+	{
+		const _prev = d.prepare("SELECT * FROM steps WHERE plan_id=? AND kind='plan' AND ord=?").get(plan.id, cur.ord - 1);
+		const _ev = String(args.evidence || "").trim();
+		const _tr = workTrace(d, plan.id);
+		if (_prev && _prev.kind === "plan" && _prev.status === "done" && _ev && _ev === String(_prev.evidence || "").trim() && !_tr.calls && !_tr.turns) {
+			const out = gate([
+				"⛔ **这看起来是「上一次调用其实成功了，你在重试」** —— 所以现在要关的，不是你以为的那一步。",
+				"",
+				`· 你要关的那一步（${stepLabel(_prev)}「${String(_prev.text).slice(0, 24)}」）**已经关了**，依据就是这一句；`,
+				`· 而本次调用要关的是 **${stepLabel(cur)}「${String(cur.text).slice(0, 24)}」**（当前步），`,
+				"  它跟刚关掉的那一步之间**没有任何新动作**（工具调用 0、用户回合 0），却被写了同一条依据。",
+				"",
+				"▶ 你现在要做的（二选一）：",
+				`  · 本来只想关 ${stepLabel(_prev)} → **已经成了**，别再调它；用 plan_status 确认即可`,
+				`  · 确实要关 ${stepLabel(cur)} → 先真做这一步，**并换一条属于它的依据**（或传 no_work_reason 说清它为什么不需要动作）`,
+				"",
+				"（这道闸门防的是「悄悄记错账」：关错一步不会报错，只会在账上多一条不实依据。）",
+			].join("\n"));
+			if (out) return out;
+		}
+	}
 	//
 	// 依据：论文实测"第一次提醒被无视后，后续被无视的概率 87.9%" →
 	// 提醒必须**第一次就带后果**，否则它只是噪音。

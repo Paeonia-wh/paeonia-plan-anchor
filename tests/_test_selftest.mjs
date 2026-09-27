@@ -382,6 +382,28 @@ check('额外步骤 30 条时，极简版仍然很短（< 1200 字符）', bigSt
 check('并且如实说明省略了多少条（不是静默截断）', /另有 \d+ 条已完成/.test(bigStatus), bigStatus.slice(0, 200));
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+section('⑫ 重试陷阱（真机发现：重试不能把下一步也关了）');
+
+// 真机现场（plan#38）：第 1 步关掉后，一次"看起来失败"的调用被重试 →
+// 而 plan_step_done 关的是**当前步**（已顺延到第 2 步）→ 第 2 步被同一条依据关掉 ✗（不报错，只记错账）。
+// 判据（三条同时成立才拦）：上一条主线步已 done + 依据逐字相同 + 两步之间零工作痕迹。
+const RT = { session: { header: { cwd: CWD + '-retry', id: 'session-retry' } } };
+await call(RT, 'plan_set', { title: '重试陷阱样本', reason: '自测：重试陷阱', steps: ['R1 甲', 'R2 乙', 'R3 丙'] });
+
+const okClose = await call(RT, 'plan_step_done', { evidence: 'R1 纯讨论定了', no_work_reason: '本步不需要工具' });
+check('第 1 步合法关掉', okClose.includes('已关闭') && okClose.includes('第 1 步'), okClose.slice(0, 120));
+
+const retryClose = await call(RT, 'plan_step_done', { evidence: 'R1 纯讨论定了', no_work_reason: '本步不需要工具' });
+check('同一依据重试 → 被认出来并拦下（不是静默关下一步）', retryClose.includes('重试'), retryClose.slice(0, 200));
+const rt2 = raw().prepare("SELECT status FROM steps WHERE plan_id=(SELECT id FROM plans WHERE title='重试陷阱样本') AND kind='plan' AND ord=2").get();
+check('第 2 步仍是 active（没被悄悄记成完成）', rt2.status === 'active', JSON.stringify(rt2));
+
+// 反例：换一条**属于第 2 步**的依据 → 应当放行（闸门不能误伤正常关步）
+const okClose2 = await call(RT, 'plan_step_done', { evidence: 'R2 也纯讨论定了', no_work_reason: '本步也不需要工具' });
+check('换一条属于本步的依据 → 正常放行（不误伤）', okClose2.includes('已关闭') && okClose2.includes('第 2 步'), okClose2.slice(0, 130));
+
+// ─────────────────────────────────────────────────────────────────────────────
 console.log('════════ plan-anchor 自测套 ════════');
 console.log(results.join('\n'));
 console.log(`\n合计：${pass} 过 / ${fail} 失败`);
