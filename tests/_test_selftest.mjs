@@ -439,6 +439,25 @@ const afterB = budgetOf();
 check('借来的计划不替我记预算（不会涨成 138/12）', afterB === beforeB, `前 ${beforeB} → 后 ${afterB}`);
 
 // ─────────────────────────────────────────────────────────────────────────────
+section('⑭ 泊位口径回归（真库验证抓到：显示按作用域、举手按 plan_id ✗）');
+
+// 场景：泊位挂在**已归档的旧计划**上（血脉可见）→ 新计划也必须举手。
+// 为什么原来漏测：我把样本的泊位挂在**同一个计划**上（两边口径恰好一致 ✓），
+// 于是 bug 只在"泊位挂在旧计划上"时才现形 —— 真库验证当场抓到，而自测当时全绿 ✗。这条专门打它。
+const XX = { session: { header: { cwd: CWD + '-park', id: 'session-park' } } };
+await call(XX, 'plan_set', { title: '泊位口径样本 v1', reason: '自测：口径回归', steps: ['甲', '乙'] });
+const v1Id = raw().prepare("SELECT id FROM plans WHERE title='泊位口径样本 v1'").get().id;
+await call(XX, 'plan_set', { title: '泊位口径样本 v2', reason: '口径回归：换一版', steps: ['甲2', '乙2'] });
+// ⚠️ 关键：泊位要**留在旧计划上**（plan_id = v1）—— 这才是真库里的形态（#2 显示 1 条、那条挂在已归档的 #1 上）。
+// 第一版我让血脉把它带过来（plan_id 被改到 v2）→ 两种口径都找得到 → **断言形同虚设** ✗（双向检验当场发现：旧口径也全过）。
+const parkCols = raw().prepare('PRAGMA table_info(parking)').all().map((c) => c.name);
+const hasResume = parkCols.includes('resume_when');
+raw().prepare(`INSERT INTO parking (plan_id, text, status, created_at${hasResume ? ', resume_when' : ''}) VALUES (?,?, 'parked', ?${hasResume ? ", '以后再说'" : ''})`)
+	.run(v1Id, '挂在旧计划上的旧欠账', Date.now() - 5 * 86400000);
+const v2Status = await call(XX, 'plan_status', {});
+check('泊位留在旧计划上时，新计划也要举手（两个口径必须一致）', /挂了超过 3 天/.test(v2Status), v2Status.slice(0, 240));
+
+// ─────────────────────────────────────────────────────────────────────────────
 console.log('════════ plan-anchor 自测套 ════════');
 console.log(results.join('\n'));
 console.log(`\n合计：${pass} 过 / ${fail} 失败`);

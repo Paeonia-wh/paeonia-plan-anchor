@@ -1148,7 +1148,11 @@ const PARK_STALE_DAYS = 3;
 function staleParking(d, plan) {
 	const cutoff = Date.now() - PARK_STALE_DAYS * 86400000;
 	try {
-		return d.prepare("SELECT id FROM parking WHERE plan_id=? AND status='parked' AND created_at < ? ORDER BY id").all(plan.id, cutoff);
+		// 【口径修复 · 2026-09-27 真库验证抓到】必须与 openParkingCount **同一口径**（按作用域 ✗ 不是按 plan_id）。
+		// 第一版我按 plan_id 查 → 于是"显示 N 条挂了很久"与"举手 N 条"两个口径对不上 ✗：
+		// 实测 #2 显示"泊位 1 条未处理"（那条挂在已归档的 #1 上、**血脉可见** ✓），
+		// 而 staleParking 按 plan_id 查 #2 → 0 条 → **永远不举手** ✗。
+		return openParkingByScope(d, plan.scope).filter((p) => Number(p.created_at) < cutoff);
 	} catch { return []; }
 }
 
