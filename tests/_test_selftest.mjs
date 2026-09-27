@@ -153,41 +153,37 @@ const withPark = await call(A, 'plan_status', {});
 check('泊位入泊成功（短版给出条数）', /泊位\s*\d+/.test(withPark), withPark.slice(-200));
 
 // ─────────────────────────────────────────────────────────────────────────────
-section('④ 新会话首问（E）：先分「正在别处做」与「遗留」');
+section('④ 伸手就拦（② 判据改造后的新语义）');
 
+// 【保命声明 · 2026-09-27】这三个是**后面所有小节都在用**的 ——
+// 我上一版替换 ④ 节时把它们一起删了 ✗ → `raw is not defined`（ReferenceError）✗。
+// 教训（今晚第二次同类，上一次是 index.js 里的 `acc`）：**替换一段代码前，先扫它声明的名字、再看后面用不用。**
 const raw = () => new DatabaseSync(P);
 const planId = raw().prepare("SELECT id FROM plans WHERE status='active' ORDER BY id DESC LIMIT 1").get().id;
-const C = { session: { header: { cwd: CWD, id: 'session-CCC' } } };   // 第三个会话，专门用来看"正在别处做"
+const C = { session: { header: { cwd: CWD, id: 'session-CCC' } } };   // 第三个会话（旧 ④ 的定义，后面几节仍在用）
 
-// 先把台账时间推老 2 小时 → 模拟"做到一半、早就没人动了的遗留计划"
-raw().prepare('UPDATE ledger SET ts = ts - 7200000 WHERE plan_id = ?').run(planId);
+// 【② 判据改造 · 2026-09-27】依据（另一位会话的评审）：
+//   开场喊「要不要接手 / 别两头做」是噪音 ✗；而且「每目录只提一次」会把记号消耗在**第一个路过**的
+//   会话身上 ✗ —— 真正要动手的那个反而没人拦（那是把「防两头做」降级成「防第一次」）。
+// 新判据：**开场不说话** ✓；**会改计划状态的工具**在伸手那一刻检查归属 → 不是我的线就拒绝 + 给唯一出口 ✓。
+// 只读工具（plan_status / plan_park / plan_health / plan_log / plan_export / plan_backup / plan_report）照旧放行 ✓。
+const EA = { session: { header: { cwd: CWD + '-b2', id: 'session-b2-owner' } } };
+await call(EA, 'plan_set', { title: 'B2 样本', reason: '自测：伸手就拦', steps: ['甲', '乙'] });
+const EB = { session: { header: { cwd: CWD + '-b2', id: 'session-b2-other' } } };
 
-const legacy = await turn(B, '你好，看看这个目录');
-check('遗留：问"要不要接着做"', legacy.includes('不是本会话开的'), `注入：${legacy.slice(0, 120) || '(空)'}`);
-check('遗留：明确要求用 ask_user_question 去问用户', legacy.includes('ask_user_question'), legacy.slice(0, 200));
-check('遗留：禁止自己替用户决定', legacy.includes('不许自己替用户决定'), '没写这条');
+const readOK = await call(EB, 'plan_status', {});
+check('只读入口照旧放行（你问它才答 = 正确形态）', /B2 样本/.test(readOK), readOK.slice(0, 170));
 
-const legacy2 = await turn(B, '继续看看');
-check('遗留：第二次不再重复首问', !legacy2.includes('需要你回话'), legacy2.slice(0, 160));
+const refused = await call(EB, 'plan_step_done', { evidence: '想关掉别人的一步', no_work_reason: '试试' });
+check('伸手改别人的线 → 被拒绝', refused.includes('别的会话的线'), refused.slice(0, 200));
+check('拒绝里点名是哪条线 + 给唯一出口 plan_claim', refused.includes('B2 样本') && refused.includes('plan_claim'), refused.slice(0, 280));
 
-await call(B, 'plan_status', {});
-const legacy3 = await turn(B, '再看看');
-check('遗留：本会话查过计划后不再问', !legacy3.includes('需要你回话'), legacy3.slice(0, 160));
+const refusedNote = await call(EB, 'plan_note', { text: '在别人的线上声明在轨' });
+check('plan_note 同样被拦（它不走 withRefs —— 最容易漏的那类）', refusedNote.includes('别的会话的线'), refusedNote.slice(0, 200));
 
-// 再插一条"别的会话刚刚动过"的台账 → 模拟"正在别处做"
-raw().prepare('INSERT INTO ledger (ts, kind, plan_id, session, ref, detail) VALUES (?,?,?,?,?,?)')
-	.run(Date.now(), 'on_track', planId, 'sOTHER', '', '自测：模拟另一个会话刚动过这条计划');
+const ownOK = await call(EA, 'plan_step_done', { evidence: '我自己那步做完了', no_work_reason: '自测' });
+check('（正对照）自己的线照旧能关步', ownOK.includes('已关闭'), ownOK.slice(0, 150));
 
-const live = await turn(C, '你好，帮我看个东西');
-check('活跃：提示"正由别的会话在做"', live.includes('正由别的会话在做'), `注入：${live.slice(0, 120) || '(空)'}`);
-check('活跃：**不再**问"要不要接着做"（防两头做同一件事）', !live.includes('要不要接着做'), live.slice(0, 200));
-check('活跃：明确说"别两头做"', live.includes('别两头做'), '没写这条');
-check('活跃：给出最后活动时间', /\d+\s*分钟前/.test(live), live.slice(0, 220));
-
-const live2 = await turn(C, '继续');
-check('活跃：只提醒一次，之后安静', !live2.includes('正由别的会话在做'), live2.slice(0, 160));
-
-// ─────────────────────────────────────────────────────────────────────────────
 section('⑤ 静音：静掉主动打扰，但账照记');
 
 // 契约（工具定义 + README）：plan_mute = "静音提醒 N 次调用"。
@@ -283,12 +279,18 @@ raw().prepare('UPDATE ledger SET ts = ts - 7200000 WHERE plan_id = ?').run(activ
 raw().prepare('INSERT INTO ledger (ts, kind, plan_id, session, ref, detail) VALUES (?,?,?,?,?,?)')
 	.run(Date.now(), 'on_track', activeId, 's1', '', '自测：老格式号（可能与新进程的号撞车）');
 
-const afterOldKey = await turn(D, '你好');
-check('老格式号的新鲜台账 → 仍判为"别人在动"（撞车不再骗过判断）', afterOldKey.includes('正由别的会话在做'), afterOldKey.slice(0, 160) || '(空)');
+// 【② 之后】开场不再喊 ✓ —— 改成：伸手那一刻被拦 ✓（D 在这个目录没有自己的线，那条是别人的）
+{
+	const afterOldKey = await call(D, 'plan_step_done', { evidence: 'x', no_work_reason: 'y' });
+	check('老格式号（跨进程匹配不上）→ 伸手被拦（不再被误当成「我自己」）', afterOldKey.includes('别的会话的线'), afterOldKey.slice(0, 170) || '(空)');
+}
 
-await call(D, 'plan_note', { text: '自测：验证台账写入的是稳定身份' });
-const newestSession = raw().prepare('SELECT session FROM ledger WHERE plan_id=? ORDER BY id DESC LIMIT 1').get(activeId).session;
-check('台账写的是稳定身份（session-…），不再是进程内号', /^session-/.test(String(newestSession)), `实际写入：${newestSession}`);
+	// ⚠️ 这条原先在**别人的线**上写 plan_note ✗ —— 现在会被伸手闸拦下（它本来就该被拦 ✓）。
+	// 改成：D 先立**自己的**一条线，再写台账 → 测的还是「台账记的是稳定身份」✓。
+	await call(D, 'plan_set', { title: 'D 自己的线', reason: '自测：台账身份', steps: ['甲'] });
+	await call(D, 'plan_note', { text: '自测：验证台账写入的是稳定身份' });
+	const newestSession = raw().prepare("SELECT session FROM ledger WHERE plan_id=(SELECT id FROM plans WHERE title='D 自己的线') ORDER BY id DESC LIMIT 1").get().session;
+	check('台账写的是稳定身份（session-…），不再是进程内号', /^session-/.test(String(newestSession)), `实际写入：${newestSession}`);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Isolated scope: validate v4 attribution and preserve downstream hook results.
@@ -424,7 +426,9 @@ await call(BO, 'plan_set', { title: '借来的线', reason: '自测：借来的�
 const BX = { session: { header: { cwd: CWD + '-borrow', id: 'session-borrow-other' } } };
 
 const firstBorrow = await turn(BX, '你好');
-check('第一次会说清"不是本会话的"（E 分支）', /不是本会话|别的会话/.test(firstBorrow), firstBorrow.slice(0, 150));
+	// 【② 之后】开场不再喊 ✓ —— 但**伸手会被拦**（判据挪到那一刻 ✓）
+	const borrowRefused = await call(BX, 'plan_step_done', { evidence: '想动别人的线', no_work_reason: '试' });
+	check('借来的线上伸手 → 被拦 + 指路 plan_claim', borrowRefused.includes('别的会话的线') && borrowRefused.includes('plan_claim'), borrowRefused.slice(0, 220));
 
 const secondBorrow = await turn(BX, '继续');
 check('**不再**出现「你正在做 / ⚙ 在做」那种自相矛盾的说法', !/你正在做|⚙ 在做/.test(secondBorrow), secondBorrow.slice(0, 180));

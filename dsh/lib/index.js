@@ -77,7 +77,7 @@ let dbPath = "";
  * 那能处理「代码比库新」，但**处理不了「库比代码新」** ——
  * 那种情况下旧代码会按旧语义读新数据，**静默出错**（正是本项目最想消灭的失败模式）。
  */
-const SCHEMA_VERSION = 3;   // v2：老 owner 认领（见 MIGRATIONS）
+const SCHEMA_VERSION = 4;   // v2：老 owner 认领（见 MIGRATIONS）
 
 /** 前向迁移表：[目标版本, 说明, 执行体]。按序执行 to > 当前版本 的条目。v1 是纯标记。 */
 const MIGRATIONS = [
@@ -121,6 +121,16 @@ const MIGRATIONS = [
 			skipped++;
 		}
 		if (a || b || skipped) console.log(`[plan-anchor] 迁移 v3：按创建者认领 ${a} 条、按压倒性写入者认领 ${b} 条（${skipped} 条证据不足，留给人裁）`);
+	}],
+	[4, "清掉 fresh_* 里的死记号（早期用进程内自增号记的：重启就重排、匹配不上任何人，还可能撞车）", (d) => {
+		let cleaned = 0;
+		for (const r of d.prepare("SELECT plan_id, key, value FROM plan_state WHERE key LIKE 'fresh%'").all()) {
+			let arr; try { arr = JSON.parse(String(r.value)); } catch { continue; }
+			if (!Array.isArray(arr)) continue;
+			const kept = arr.filter((x) => /^session-/.test(String(x)));
+			if (kept.length !== arr.length) { stSet(d, r.plan_id, r.key, JSON.stringify(kept)); cleaned += arr.length - kept.length; }
+		}
+		if (cleaned) console.log(`[plan-anchor] 迁移 v4：清掉 ${cleaned} 条死记号（进程内自增号写的，重启即失效）`);
 	}],
 ];
 
@@ -754,6 +764,44 @@ function freshKeyAdd(d, planId, key, v) {
 	try { stSet(d, planId, key, JSON.stringify(a)); } catch { /* 记不上也不能打断主流程 */ }
 }
 
+/**
+ * 【② 判据改造 · 2026-09-27】会**改计划状态**的工具清单（只读的照旧放行）。
+ * 依据（另一位会话的评审）："别两头做"应当拦在**伸手那一刻**，而不是开场喊一句 ✗。
+ */
+const MUTATING_TOOLS = new Set(["planDiscover", "planGoto", "planClose", "planAmend", "planInsert", "planDrop", "planRework", "planReview", "planMute", "planGc"]);
+
+/**
+ * 【伸手就拦】解析到的那条线**不是本会话的** → 拒绝，并给出唯一正确的出口。
+ * 为什么放在这里而不是开场：开场喊是噪音 ✗；而且"每目录只提一次"会把记号消耗在第一个路过的
+ * 会话身上 ✗ —— 真正要动手的那个反而没人拦（那是把"防两头做"降级成"防第一次"）。
+ * 只读工具不受影响 ✓：你问它才答 = 正确形态。
+ */
+function refuseIfNotMine(d, scope, session, label) {
+	const plan = activePlan(d, scope, session);
+	if (!plan) return null;
+	// ⚠️ 归属必须用**传进来的 session** 判，不能靠全局 CURRENT_SESSION ——
+	// planStepDone/planNote/planAsk **不走 withRefs** ✗，全局值可能是别的调用留下的 ✗
+	// （第一版我用了 isMine(plan) → 自测当场 7 项报"自己的计划也被拦" ✗ —— 与今晚那条老 bug 同一个形状 ✓）。
+	const _mine = !plan.owner || !session || plan.owner === session;
+	if (_mine) return null;
+	const live = liveElsewhere(d, plan.id);
+	return {
+		ok: false,
+		reason: [
+			`⛔ **这是别的会话的线，不是本会话的** —— 所以 ${label} 不能动它。`,
+			"",
+			`   《${plan.title}》` + (plan.owner ? `（属主 ${String(plan.owner).slice(0, 22)}…）` : ""),
+			live ? `   最后活动：${live.mins} 分钟前（会话 ${live.who}）` : "",
+			"",
+			"▶ 两个出口（二选一）：",
+			`   · 确实要接手它 → \`plan_claim({ plan_id: ${plan.id} })\`（认领会挤掉对方 —— 先确认那条线没人正在做）`,
+			"   · 干自己的活 → `plan_set` 立一条（同目录并存，不影响它）",
+			"",
+			"（这条拦在**伸手那一刻**，不是开场喊一句 —— 所以它只在你真要碰它的时候出现。）",
+		].filter(Boolean).join("\n"),
+	};
+}
+
 function withRefs(d, args, scope, fn, session = "") {
 	let a = args || {};
 	const notes = [];
@@ -761,6 +809,11 @@ function withRefs(d, args, scope, fn, session = "") {
 	const _prevSession = CURRENT_SESSION;
 	CURRENT_SESSION = session || "";
 	try {
+		// 【② 判据改造 · 2026-09-27】会改计划状态的工具：**伸手那一刻**检查归属（只读的放行 ✓）
+		if (MUTATING_TOOLS.has(fn && fn.name)) {
+			const _refusal = refuseIfNotMine(d, scope, session, `plan_${String((fn && fn.name) || "").replace(/^plan/, "").toLowerCase()}`);
+			if (_refusal) return _refusal;
+		}
 		const plan = activePlan(d, scope);
 		if (plan) {
 			for (const [idKey, ordKey] of REF_PAIRS) {
@@ -1798,6 +1851,7 @@ function planStatus(d, args, scope = "") {
 /** 3. plan_step_done：完成当前步（evidence 必填，防"假装推进"） */
 function planStepDone(d, args, scope = "", session = "") {
 	const plan = activePlan(d, scope, session);   // 【问题7】必须用**传进来的**会话：本函数不走 withRefs，全局 CURRENT_SESSION 可能是别人的
+	{ const _r = refuseIfNotMine(d, scope, session, "plan_step_done"); if (_r) return _r; }   // 【伸手就拦】
 	if (!plan) return { ok: false, reason: "没有生效计划" };
 	const cur = currentStep(d, plan.id);
 	if (!cur) return { ok: false, reason: "当前没有进行中的步骤", briefing: anchorText(d, plan) };
@@ -3082,6 +3136,7 @@ function planNote(d, args, scope = "", session = "") {
 	// （只用 scope —— 这几个函数里有的没有 session 参数，别依赖它）
 	{ const _p = activePlan(d, scope, session); if (_p) { clearWarnUnanswered(d, _p.id); markFresh(d, _p.id); } }
 	const plan = activePlan(d, scope, session);   // 【问题7】同上
+	{ const _r = refuseIfNotMine(d, scope, session, "plan_note"); if (_r) return _r; }   // 【伸手就拦】
 	if (!plan) return { ok: false, reason: "当前项目没有生效计划 —— 没有计划就没有预算可清。" };
 	const cur = currentStep(d, plan.id);
 	const text = (args.text || "").trim();
@@ -3206,6 +3261,7 @@ const ASK_KINDS = {
 
 function planAsk(d, args, scope = "", session = "") {
 	const plan = activePlan(d, scope, session);   // 【问题7】同上
+	{ const _r = refuseIfNotMine(d, scope, session, "plan_ask"); if (_r) return _r; }   // 【伸手就拦】
 	if (!plan) return { ok: false, reason: "当前项目没有生效计划 —— 没有计划就谈不上「偏离计划」。" };
 	const kind = String(args.kind || "").trim();
 	if (!ASK_KINDS[kind]) {
@@ -3552,7 +3608,12 @@ function turnAnchorNotice(d, scope = "") {
 	// 把回合锚顶掉（发布仓 440 项测试当场抓到）。owner 为空者一律按"继承"处理，不打扰。
 	// 【问题1】与 plan_claim 同一依据：本会话在此目录**已有自己的计划**时，不再来问"要不要接手别人的"
 	// （否则会出现"先说不是本会话开的、认领时又说本会话已经有了"的自相矛盾）
-	if (freshSessionPolicy !== "inherit" && CURRENT_SESSION && plan.owner && plan.owner !== CURRENT_SESSION
+	// 【② 判据改造 · 2026-09-27】开场那套通知**整体关掉**（判据挪到"伸手那一刻" ✓，见 refuseIfNotMine）。
+	// ⚠️ 为什么是"关掉"而不是"删掉"：我上一版整块删了 120 行 ✗ → 里面的 `acc` 等声明**后面还在用** ✗
+	// → turnAnchorNotice 抛 ReferenceError → 被 observe 的 catch **静默吞掉** → **锚悄悄消失** ✗。
+	// 教训：别整块删你没读完的代码；要关就关。
+	const OPENING_NOTICES = false;
+	if (OPENING_NOTICES && freshSessionPolicy !== "inherit" && CURRENT_SESSION && plan.owner && plan.owner !== CURRENT_SESSION
 		&& !ownActivePlan(d, plan.scope, CURRENT_SESSION)) {
 		const _engaged = freshKeyList(d, plan.id, "fresh_engaged_keys");
 		if (!_engaged.includes(CURRENT_SESSION)) {
