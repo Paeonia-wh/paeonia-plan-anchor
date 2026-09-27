@@ -1212,6 +1212,13 @@ const brief = opts.brief !== false;
 	} else {
 		lines.push("🅿 泊位空。");
 	}
+		// 【同域多线 · 2026-09-27 真机】一个会话在同一目录能有多条自己的线（实测某会话有 #17/#27）——
+		// 解析只挑一条 ✗，另一条就"看不见"了（它的泊位举手、回程票都不会响 ✗）。
+		// 对策：如实点出来 + 给一个**能用的入口**（plan_status 支持按 id 查）。
+		if (CURRENT_SESSION) {
+			const _sib = d.prepare("SELECT id,title FROM plans WHERE status='active' AND scope=? AND owner=? AND id<>? ORDER BY id DESC").all(plan.scope, CURRENT_SESSION, plan.id);
+			if (_sib.length) lines.push(`📂 你在这个目录还有 ${_sib.length} 条自己的线：` + _sib.map((p) => `#${p.id}『${String(p.title).slice(0, 14)}』`).join("、") + "（要看哪条：plan_status 带 plan_id）");
+		}
 	// 偏离额度：不做禁令，只做可见的代价（Scrum Guide 2020 的立场是"尽早调整"，不是"禁止调整"）
 	if (detourUsed(d, plan.id) > detourBudget) {
 		lines.push(`⚠ 偏离额度已用尽（已提取 ${detourUsed(d, plan.id)} 条 / 额度 ${detourBudget}）—— 不禁止，但请把这笔代价算进判断。`);
@@ -1542,7 +1549,12 @@ function planClaim(d, args, scope = "", session = "") {
 }
 
 function planStatus(d, args, scope = "") {
-	const plan = activePlan(d, scope);
+	// 【同域多线 · 2026-09-27】支持按 id 指定要看哪条线（本目录里你有多条自己的线时用它切换）。
+	// ⚠️ 我第一版只加了参数声明、**没接线** ✗ —— 那是典型的"说了没做"（插件自己的注释里警告过这类）。
+	// 只读：不改任何状态；查别人的线也允许（E 分支的文案本来就写着"plan_status 看只读状态"）。
+	const _wantId = Number(args && args.plan_id || 0);
+	const plan = _wantId ? d.prepare("SELECT * FROM plans WHERE id=?").get(_wantId) : activePlan(d, scope);
+	if (_wantId && !plan) return { ok: false, reason: `计划 #${_wantId} 不存在。` };
 	if (!plan) {
 		const head = anchorText(d, null, { scopeHint: scope || "（本次调用拿不到会话工作目录，退化到默认作用域）" });
 		// 【#9 认领】本会话没有计划时，**把本目录的线列出来** ——
@@ -4337,7 +4349,8 @@ function apply(ctx, config) {
 			params: {
 				threshold: { type: "number", description: "漂移判定的调用次数阈值（默认 12，仅本次查询生效）" },
 				detail: { type: "string", description: "brief（默认·极简：我在哪 / 下一件 / 几条欠账 / 漂不漂）/ full（全部步骤 + 泊位 + 修订史）" },
-				step: { type: "number", description: "只要某一步的全文（含它的验收与依据）—— 传步骤 id" }
+				step: { type: "number", description: "只要某一步的全文（含它的验收与依据）—— 传步骤 id" },
+				plan_id: { type: "number", description: "要看**哪一条线**（可选）。本目录里你有多条自己的线时用它切换查看 —— 读只读状态，不改任何东西" },
 			},
 			exec: (a, x) => withRefs(d, a, scopeOf(x), planStatus, sessionKeyOf(x && x.agent))
 		},
@@ -4699,6 +4712,11 @@ function observe(d, exec) {
 	if (!exec || !exec.agent) return null;
 	const scope = scopeOf(exec); // 每会话各自的工作目录 → 各自的项目
 	const plan = activePlan(d, scope);
+	// 【归属守卫 · 2026-09-27 真机】不是本会话的活 → 下面整条链（用户信号 / 记账提醒 / 开新活 /
+	// 漂移质问 / scope 提醒）**一句都不该说** ✗ —— 它们全是"对'我的计划'说的话"。
+	// 由来：用户在**别人的计划**活跃的目录里收到「【用户信号：先不】他在叫你停」+ 那条计划的真实进度 ✗。
+	// "要不要接手"由 pre-step 的 turnAnchorNotice（E 分支）问过一次，够了。
+	if (exec && exec.agent) CURRENT_SESSION = sessionKeyOf(exec.agent);   // 归属判定必须用本会话身份
 	const toolName = exec.name;
 	// 【计划新鲜度】每次工具调用 +1（入库动作会清零）—— 单位与论文一致
 	// 【真机现场】不是我这条线就不记我的账（老账：多会话共用一条计划 → 预算涨到 138/12）
@@ -4765,6 +4783,7 @@ function observe(d, exec) {
 	//     observe 档 = 只记录（供统计误报率）；advise 档 = 本步首次越界时提醒一次（仍不拦）
 	//     ⚠ 这一段必须在"静音检查"**之前**：静音的意思是不打扰，**不是停止观察**
 	//     （红队抓到的：以前静音会连判决一起停掉，等于静音期间瞎了）
+	const _mineForAdvice = isMine(plan);   // 【归属】这两段都是"对你这条线"说的话 → 不是我的活就别说
 	let scopeNotice = null;
 	if (scopeMode !== "off") {
 		const cs = currentStep(d, planId);
@@ -4773,6 +4792,7 @@ function observe(d, exec) {
 			recordVerdict(d, planId, cs.id, toolName, v);
 			if (scopeMode === "advise" && v.verdict === "out-of-scope" && stGet(d, planId, "scope_nudged") !== String(cs.id)) {
 				stSet(d, planId, "scope_nudged", String(cs.id));
+				if (_mineForAdvice)   // 【归属】不是我的活 → 不提醒"本步 scope"
 				scopeNotice = notice([
 					`【计划锚 · scope 观察】当前是主线${stepLabel(cs)}「${cs.text}」，你动了 scope 之外的东西：`,
 					`- 工具 ${toolName}　- 目标 ${v.target}`,
@@ -4811,7 +4831,11 @@ function observe(d, exec) {
 	const usig = pendingUserSignal.get(exec.agent);
 	if (usig) {
 		pendingUserSignal.delete(exec.agent);
-		const brief = progressBriefing(d, plan);
+		// 【归属 · 2026-09-27 真机】用户信号是对**本会话**说的（"停"就要停 ✓，与计划归谁无关），
+		// 但**不能把别人的计划当成你的** ✗ —— 真机现场：陌生会话被告知"照这个答、不要凭记忆"，
+		// 要答的却是**别人的**计划的进度 ✗。所以：不是我的活 → 换成一句中性的。
+		const brief = isMine(plan) ? progressBriefing(d, plan)
+			: "（这条提示是关于**你这个会话**的；本目录那条活跃计划不是本会话开的 —— 要它的进度，去开它的那个会话问。）";
 		if (usig.kind === "interrupt") {
 			return notice([
 				`【用户信号：${usig.hit}】他在叫你停。`,

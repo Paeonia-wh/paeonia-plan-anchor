@@ -295,6 +295,11 @@ check('台账写的是稳定身份（session-…），不再是进程内号', /^
 const v4Cwd = CWD + "-v4";
 const owner = { session: { header: { cwd: v4Cwd, id: "session-v4-owner" } } };
 await call(owner, "plan_set", { title: "v4 fixture", steps: ["fixture work"] });
+// ⚠️ 【2026-09-27 归属守卫上线后必须补这一步】本节验的是 **v4 来源格式 + 下游结果保留**，
+// 不是归属 —— 而下面的探针会话（session-v4-continue / -block）**不是这条计划的属主** ✗。
+// 守卫上线后，陌生人**不该**收到任何提醒（真机报告正是这么要求的 ✓）→ 于是这里会少一条 additionalContext ✗。
+// 所以把夹具改成"无主"（owner='' → isMine 为真），让本节继续只测它本来要测的东西 ✓。
+raw().prepare("UPDATE plans SET owner='' WHERE title='v4 fixture'").run();
 for (const kind of ['continue', 'block']) {
 	const probe = { session: { header: { cwd: v4Cwd, id: `session-v4-${kind}` } } };
 	await say(probe, '继续');
@@ -456,6 +461,40 @@ raw().prepare(`INSERT INTO parking (plan_id, text, status, created_at${hasResume
 	.run(v1Id, '挂在旧计划上的旧欠账', Date.now() - 5 * 86400000);
 const v2Status = await call(XX, 'plan_status', {});
 check('泊位留在旧计划上时，新计划也要举手（两个口径必须一致）', /挂了超过 3 天/.test(v2Status), v2Status.slice(0, 240));
+
+// ─────────────────────────────────────────────────────────────────────────────
+section('⑮ 三处修复：同域多线提示 / 用户信号归属 / 按 id 看另一条线');
+
+// ① 同域多线：一个会话在同一目录有多条自己的线时，锚里要点出来（否则另一条"看不见"）
+const ML = { session: { header: { cwd: CWD + '-multi', id: 'session-multi' } } };
+await call(ML, 'plan_set', { title: '多线样本 A', reason: '自测：多线', steps: ['甲', '乙'] });
+const mlOwner = raw().prepare("SELECT owner FROM plans WHERE title='多线样本 A'").get().owner;
+// 直接插第二条（同一个 owner ✓）：scope 必须**取计划 A 的真实 scope**（别自己拼路径 ——
+// 第一次我拼了 `CWD + '-multi'`，与规范化后的 scope 不一致 → 兄弟查询查不到 → 断言假失败 ✗）
+const mlScope = raw().prepare("SELECT scope FROM plans WHERE title='多线样本 A'").get().scope;
+raw().prepare("INSERT INTO plans (title, version, status, scope, owner, created_at) VALUES (?,1,'active',?,?,?)")
+	.run('多线样本 B', mlScope, mlOwner, Date.now());
+const mlBId = raw().prepare("SELECT id FROM plans WHERE title='多线样本 B'").get().id;
+const mlOut = await call(ML, 'plan_status', {});
+check('同域多线时，锚里点出「你还有别的线」', /还有 \d+ 条自己的线/.test(mlOut), mlOut.slice(0, 240));
+check('并且给了可操作入口（plan_status 带 plan_id）', mlOut.includes('plan_id'), mlOut.slice(0, 260));
+
+// ③ 按 id 看另一条线（我第一版只加了参数声明、没接线 ✗ —— 断言要能抓到这个"说了没做"）
+const byId = await call(ML, 'plan_status', { plan_id: mlBId });
+check('plan_status 能按 id 看另一条线', byId.includes('多线样本 B'), byId.slice(0, 160));
+check('不存在的 id → 明确报错', (await call(ML, 'plan_status', { plan_id: 999999 })).includes('不存在'), '');
+
+// ② 用户信号也必须认归属：别人的计划上**不许**注入"他在叫你停 + 那条计划的真实进度"
+const SG = { session: { header: { cwd: CWD + '-signal', id: 'session-sig-owner' } } };
+await call(SG, 'plan_set', { title: '信号归属样本', reason: '自测：信号归属', steps: ['甲', '乙'] });
+const SX = { session: { header: { cwd: CWD + '-signal', id: 'session-sig-other' } } };
+const strangerSignal = await turn(SX, '先不做了，停一下');          // 陌生人说"停"
+// 口径（修正过一次）：**用户信号照给** ✓ —— "他在叫你停"是对**这个会话**说的，跟计划归谁无关（停就要停 ✓）；
+// **不该给的**是把别人的计划当成它的 ✗（不摆那条计划的标题/进度 ✓）。第一版我写反了，断言当场把它纠回来 ✓。
+check('别人的计划上：信号照给，但不摆那条计划的进度（不把别人的计划当成你的）',
+	/他在叫你停/.test(strangerSignal) && !/信号归属样本/.test(strangerSignal), strangerSignal.slice(0, 260));
+const ownerSignal = await turn(SG, '先不做了，停一下');             // 正对照：属主说"停" → 应该有
+check('（正对照）属主自己的计划上，照常注入「他在叫你停」', /他在叫你停/.test(ownerSignal), ownerSignal.slice(0, 220));
 
 // ─────────────────────────────────────────────────────────────────────────────
 console.log('════════ plan-anchor 自测套 ════════');
