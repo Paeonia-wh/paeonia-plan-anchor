@@ -1449,7 +1449,22 @@ function planClaim(d, args, scope = "", session = "") {
 	// activePlan 走"没有会话信息"分支返回 all[0]（最新那条）→ 误判成"本会话已经有计划了"。
 	const mine = ownActivePlan(d, scope, session);   // 【问题1】与 E 首问同一依据
 	if (mine) {
-		return { ok: false, reason: `本会话已经有计划了：『${mine.title}』（v${mine.version}）。要换线先把它收尾（plan_review）或让开（plan_set 带 replace）。` };
+		// 【真机现场 · 2026-09-27】把"时点差异"说清楚：
+		// E 的「不是本会话开的」是**你立自己的计划之前**说的；这句拒绝是**之后**的。
+		// 两句话各自为真、却被读成"自相矛盾" —— 补一段解释，并给出两步路径。
+		return {
+			ok: false,
+			reason: [
+				`⛔ 本会话已经有计划了：『${mine.title}』（v${mine.version}）—— 所以这条不能直接认领。`,
+				"",
+				"（顺带说明一句，免得看起来自相矛盾：那条「这个项目上有一条计划，但不是本会话开的」的提醒，" +
+					" 说的是**你立自己这条计划之前**的状态 —— 状态变了，那条提醒就已经过期了。）",
+				"",
+				"▶ 要接手这条线，两步：",
+				"  ① 先把自己那条收尾或让开：plan_review（做完）／ plan_set 带 replace: true（换线）",
+				`  ② 再 plan_claim({ plan_id: ${Number(args.plan_id || 0) || "<id>"} })`,
+			].join("\n"),
+		};
 	}
 	const id = Number(args.plan_id || 0);
 	if (!id) return { ok: false, reason: "plan_id 必填 —— 先 plan_status 看本目录有哪些线可以认领。" };
