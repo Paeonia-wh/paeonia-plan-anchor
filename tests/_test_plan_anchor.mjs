@@ -128,7 +128,12 @@ let inj = await fire('read', { file_path: 'D:/x/Dockerfile' });
 check('回合锚已注入', noticeText(inj).includes('【计划锚】'), noticeText(inj));
 check('锚里带计划名与当前步', noticeText(inj).includes('把电梯 demo 上 Docker') && noticeText(inj).includes('写 Dockerfile'), noticeText(inj));
 check('锚里带泊位数', noticeText(inj).includes('泊位 1 条未处理'), noticeText(inj));
-check('来源标注为 plugin（不会被当成人发言）', inj[0]?.source?.kind === 'plugin' && inj[0]?.source?.plugin === 'plan-anchor', JSON.stringify(inj[0]?.source));
+// 【2026-09-27 修正】DSH 是 formatVersion 4：source.kind 必须是**产出者自有的种类**，
+    // 插件要写 `plugin:<插件名>`；裸 "plugin" 会在入库时被拒（原文：format v4 message requires
+    // a producer-owned source kind）。所以断言**以 v4 写法为准**，旧写法只是兼容性兜底。
+    const srcOk = inj[0]?.source?.kind === 'plugin:plan-anchor'
+      || (inj[0]?.source?.kind === 'plugin' && inj[0]?.source?.plugin === 'plan-anchor');
+    check('来源标注为插件自有种类（v4：plugin:plan-anchor；不会被当成人发言）', srcOk, JSON.stringify(inj[0]?.source));
 inj = await fire('read', { file_path: 'D:/x/Dockerfile' });
 check('同一回合不重复注入', inj.length === 0, inj.length);
 

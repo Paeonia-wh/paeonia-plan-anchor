@@ -1382,11 +1382,21 @@ function planSet(d, args, scope = "", session = "") {
  * 所以补一个显式的认领动作：**看得见（plan_status 列出来）+ 能接手（plan_claim）**。
  * 配上已做的"不许互踩"和"能看见别人"，多会话协作三件套就齐了。
  */
+/**
+ * 【问题1 · 2026-09-27】本会话在这个目录里**自己的**活跃计划。
+ * 用途：让"要不要问用户接手别人的计划"（E 首问）与"能不能认领"（plan_claim）
+ * 用**同一个依据** —— 两处依据不同时，会出现"先说不是本会话的、又说本会话已经有了"这种自相矛盾。
+ */
+function ownActivePlan(d, scope, owner) {
+	if (!owner) return null;
+	return d.prepare("SELECT * FROM plans WHERE status='active' AND scope=? AND owner=? ORDER BY id DESC LIMIT 1").get(scope, owner) || null;
+}
+
 function planClaim(d, args, scope = "", session = "") {
 	// 【注意】这里必须用**传进来的 session**，不能用全局 CURRENT_SESSION ——
 	// 'withRefs(d, a, scope, fn)' 的第 5 个参数没传时，CURRENT_SESSION 会是空串 →
 	// activePlan 走"没有会话信息"分支返回 all[0]（最新那条）→ 误判成"本会话已经有计划了"。
-	const mine = activePlan(d, scope, session);
+	const mine = ownActivePlan(d, scope, session);   // 【问题1】与 E 首问同一依据
 	if (mine) {
 		return { ok: false, reason: `本会话已经有计划了：『${mine.title}』（v${mine.version}）。要换线先把它收尾（plan_review）或让开（plan_set 带 replace）。` };
 	}
@@ -1495,6 +1505,13 @@ function planStatus(d, args, scope = "") {
 					...planStepsAll(d, plan.id).map((s) => {
 						const mark = s.status === "done" ? "✔" : s.status === "dropped" ? "⊘丢弃" : s.status === "blocked" ? "⛔" : cur && s.id === cur.id ? "▶" : "·";
 						return `  ${mark} 主线${stepLabel(s)}(id=${s.id}) ${String(s.text).slice(0, 30)}`;
+					})] : []),
+				// 【问题4a · 2026-09-27】额外步骤也要列出来**并带 id** —— 主线步与额外步的 id 混在一条序列里，
+				// 不印 id 就没法从"额外第 27 条"推出该填什么（实测：为此得看全量，上下文紧时只能跳过）。
+				...(lineageDetours(d, plan).length ? ["", "额外步骤（同样带 id）：",
+					...lineageDetours(d, plan).map((s) => {
+						const mark = s.status === "done" ? "✔" : s.status === "skipped" ? "⊘中止" : cur && s.id === cur.id ? "⚙在做" : "·";
+						return `  ${mark} 额外步骤${s.detour_no}(id=${s.id}) ${String(s.text).slice(0, 30)}`;
 					})] : []),
 				`漂移预算：已用 ${Math.round(budget(d, plan.id) * 10) / 10}/${threshold} 次无进展调用`,
 				...(muteLeft(d, plan.id) > 0 ? [`⏸ 主动提醒已静音，还剩 ${muteLeft(d, plan.id)} 次调用（静音不是免责，台账照记）`] : []),
@@ -1624,7 +1641,7 @@ function planStatus(d, args, scope = "") {
 
 /** 3. plan_step_done：完成当前步（evidence 必填，防"假装推进"） */
 function planStepDone(d, args, scope = "", session = "") {
-	const plan = activePlan(d, scope);
+	const plan = activePlan(d, scope, session);   // 【问题7】必须用**传进来的**会话：本函数不走 withRefs，全局 CURRENT_SESSION 可能是别人的
 	if (!plan) return { ok: false, reason: "没有生效计划" };
 	const cur = currentStep(d, plan.id);
 	if (!cur) return { ok: false, reason: "当前没有进行中的步骤", briefing: anchorText(d, plan) };
@@ -1632,9 +1649,13 @@ function planStepDone(d, args, scope = "", session = "") {
 	// 后续关卡不再拦——否则两关会乒乓（放行→立刻被另一关拒→计数器重置→无限循环），
 	// 那正是行业 cap 要防的死循环，必须避免。
 	let released = false;
+	// 【问题3 · 2026-09-27】门禁拒绝统一抬头：把"被门禁拦"和"参数/编号错"**在现象上分开**。
+	// 由来（实测）：只说「先回应那条提醒」时，人被拦后误判成「我关不掉这一步（找不到编号）」——
+	// 而真相是「没先回应提醒」。两件事长得一样，就会修错方向。
+	const gateHeader = (body) => [body, "", "（这是一道**门禁**，不是参数或编号错误 —— 你填的 id/序号没问题；", "  你现在要做的，就是上面那些箭头里指的那一件事。）"].join("\n");
 	const gate = (reason) => {
 		if (released) return null;
-		const out = refuseOrRelease(d, plan.id, "plan_step_done", cur.id, refuseCap, { ok: false, reason, briefing: anchorText(d, plan) }, session);
+		const out = refuseOrRelease(d, plan.id, "plan_step_done", cur.id, refuseCap, { ok: false, reason: gateHeader(reason), briefing: anchorText(d, plan) }, session);
 		if (out) return out;
 		released = true;
 		return null;
@@ -2840,8 +2861,8 @@ function complianceLine(d, planId) {
 function planNote(d, args, scope = "", session = "") {
 	// 【强制点】任何一次有意义的回应都清掉「提醒被无视」的水印
 	// （只用 scope —— 这几个函数里有的没有 session 参数，别依赖它）
-	{ const _p = activePlan(d, scope); if (_p) { clearWarnUnanswered(d, _p.id); markFresh(d, _p.id); } }
-	const plan = activePlan(d, scope);
+	{ const _p = activePlan(d, scope, session); if (_p) { clearWarnUnanswered(d, _p.id); markFresh(d, _p.id); } }
+	const plan = activePlan(d, scope, session);   // 【问题7】同上
 	if (!plan) return { ok: false, reason: "当前项目没有生效计划 —— 没有计划就没有预算可清。" };
 	const cur = currentStep(d, plan.id);
 	const text = (args.text || "").trim();
@@ -2965,7 +2986,7 @@ const ASK_KINDS = {
 };
 
 function planAsk(d, args, scope = "", session = "") {
-	const plan = activePlan(d, scope);
+	const plan = activePlan(d, scope, session);   // 【问题7】同上
 	if (!plan) return { ok: false, reason: "当前项目没有生效计划 —— 没有计划就谈不上「偏离计划」。" };
 	const kind = String(args.kind || "").trim();
 	if (!ASK_KINDS[kind]) {
@@ -3239,7 +3260,7 @@ function notice(text, summary) {
 	const message = {
 		role: "user",
 		content: [{ type: "text", text }],
-		source: { kind: "plugin", plugin: "plan-anchor", form: "notice", summary },
+		source: { kind: "plugin:plan-anchor", form: "notice", summary },
 		id: randomUUID()
 	};
 	return Object.freeze(message);
@@ -3304,7 +3325,10 @@ function turnAnchorNotice(d, scope = "") {
 	// 为什么加：原来只看"本会话没打过照面"，而"照面"是在**工具路径**里记的 ——
 	// 若某次调用拿不到会话（无 exec 上下文），记号打不上，E 就会把"自己的计划"误判成"别人的"，
 	// 把回合锚顶掉（发布仓 440 项测试当场抓到）。owner 为空者一律按"继承"处理，不打扰。
-	if (freshSessionPolicy !== "inherit" && CURRENT_SESSION && plan.owner && plan.owner !== CURRENT_SESSION) {
+	// 【问题1】与 plan_claim 同一依据：本会话在此目录**已有自己的计划**时，不再来问"要不要接手别人的"
+	// （否则会出现"先说不是本会话开的、认领时又说本会话已经有了"的自相矛盾）
+	if (freshSessionPolicy !== "inherit" && CURRENT_SESSION && plan.owner && plan.owner !== CURRENT_SESSION
+		&& !ownActivePlan(d, plan.scope, CURRENT_SESSION)) {
 		const _engaged = freshKeyList(d, plan.id, "fresh_engaged_keys");
 		if (!_engaged.includes(CURRENT_SESSION)) {
 			if (freshSessionPolicy === "ignore") return null;
