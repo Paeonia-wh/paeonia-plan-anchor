@@ -768,7 +768,11 @@ function freshKeyAdd(d, planId, key, v) {
  * 【② 判据改造 · 2026-09-27】会**改计划状态**的工具清单（只读的照旧放行）。
  * 依据（另一位会话的评审）："别两头做"应当拦在**伸手那一刻**，而不是开场喊一句 ✗。
  */
-const MUTATING_TOOLS = new Set(["planDiscover", "planGoto", "planClose", "planAmend", "planInsert", "planDrop", "planRework", "planReview", "planMute", "planGc"]);
+const MUTATING_TOOLS = new Set(["planDiscover", "planGoto", "planClose", "planAmend", "planInsert", "planDrop", "planRework", "planMute", "planGc"]);
+// ⚠️ 为什么 `planReview` **不在**清单里（2026-09-27 我一度放进去 ✗，被发布仓两条用例当场证伪 ✓）：
+//   它的安全性来自**宿主校验** —— `user_said` 必须是用户真说过的原话，编的会被当场拒 ✓；
+//   而不是来自"只有属主能调" ✗。而且「新会话接着收尾 + 用户确认」是**合法流程** ✓。
+//   （教训：往"要拦"的清单里加东西时，先问一句"它的安全是靠什么保证的"。）
 
 /**
  * 【伸手就拦】解析到的那条线**不是本会话的** → 拒绝，并给出唯一正确的出口。
