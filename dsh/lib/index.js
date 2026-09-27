@@ -1172,6 +1172,22 @@ const brief = opts.brief !== false;
 	const cur = currentStep(d, plan.id);
 	const done = steps.filter((s) => s.status === "done").length;
 	const park = openParkingByScope(d, plan.scope);
+
+	// 【归属兜底 · 2026-09-27 真机】这里是**唯一**渲染锚的地方 —— 那就在源头兜住。
+	// 各入口（pre-step / observe / 压缩补锚 / 工具回执…）已经各自守过一道，但**入口会新增** ✗，
+	// 而真机里确实还有残留（我自己偶尔还会看到别人计划的那套"▶ 要做…"✗）。
+	// 与其逐个堵，不如在源头：不是本会话的活 → **绝不摆成"你的活"** ✓，
+	// 只如实说"这是本目录的活跃计划、但不是本会话开的" + 两个出口。
+	if (!isMine(plan) && plan.owner) {
+		return [
+			`📂 本目录的活跃计划（**不是本会话开的**）：《${plan.title}》｜${progressText(done, steps.length)}`,
+			cur ? `   它停在：${stepLabel(cur)}「${cueShort(cur, 50)}」` : "",
+			"",
+			"▶ 两个出口：",
+			`   · 要接手它 → \`plan_claim({ plan_id: ${plan.id} })\`（认领会挤掉对方，先确认那条线没人正在做）`,
+			"   · 干自己的活 → `plan_set` 立一条（同目录并存，不影响它）",
+		].filter(Boolean).join("\n");
+	}
 	const dts = lineageDetours(d, plan); // 额外步骤按**谱系**统计：改计划不该让编号重启
 	const dtDone = dts.filter((s) => s.status === "done").length;
 	const lines = [];

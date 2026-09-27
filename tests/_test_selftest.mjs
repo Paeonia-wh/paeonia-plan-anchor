@@ -497,6 +497,21 @@ const ownerSignal = await turn(SG, '先不做了，停一下');             // �
 check('（正对照）属主自己的计划上，照常注入「他在叫你停」', /他在叫你停/.test(ownerSignal), ownerSignal.slice(0, 220));
 
 // ─────────────────────────────────────────────────────────────────────────────
+section('⑯ 源头兜底：锚是唯一渲染处 —— 不是我的活就绝不摆成"你的活"');
+
+// 【2026-09-27 真机残留】我自己偶尔还会看到**别人的计划**的那套"▶ 要做…" ✗（入口逐个堵会漏 ✗：
+// pre-step / observe / 压缩补锚 / 工具回执… 而且入口会继续新增）。
+// 修法：在 anchorText（唯一渲染锚的地方）**源头兜住** —— 不是本会话的活 → 只如实说明 + 两个出口。
+const FS1 = { session: { header: { cwd: CWD + '-foreign', id: 'session-f-owner' } } };
+await call(FS1, 'plan_set', { title: '别人的线', reason: '自测：源头兜底', steps: ['甲', '乙'] });
+const FS2 = { session: { header: { cwd: CWD + '-foreign', id: 'session-f-other' } } };
+const foreignView = await call(FS2, 'plan_status', {});
+check('别人的计划：锚不摆成「你的活」', !/▶ 要做|你正在做|⚙ 在做/.test(foreignView), foreignView.slice(0, 240));
+check('别人的计划：如实说明「不是本会话开的」+ 两个出口', /不是本会话开的/.test(foreignView) && /plan_claim/.test(foreignView), foreignView.slice(0, 260));
+const ownerView = await call(FS1, 'plan_status', {});
+check('（正对照）属主照旧看到完整锚「▶ 要做」', /▶ 要做/.test(ownerView), ownerView.slice(0, 200));
+
+// ─────────────────────────────────────────────────────────────────────────────
 console.log('════════ plan-anchor 自测套 ════════');
 console.log(results.join('\n'));
 console.log(`\n合计：${pass} 过 / ${fail} 失败`);
