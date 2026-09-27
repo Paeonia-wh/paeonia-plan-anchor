@@ -4841,18 +4841,19 @@ function observe(d, exec) {
 	}
 	if (scopeNotice) return scopeNotice;
 
+	// 【真机现场 · 2026-09-27】不是本会话的活 → **从这里开始一律停**：
+	// 上面 turnAnchorNotice 里的 E 分支已经问过"要不要接手"（那一步必须留着）；
+	// 而这之后的每一条（**开新活提醒** / 漂移质问）都是**对"我的计划"说的话** ✗ ——
+	// 「【计划锚】**你正在做**主线第 N 步，却调用了 todo_write 开了一项新活」正是另一位会话报的
+	// 那句自相矛盾的原话，而它的**原产地就是开新活提醒**（我上一轮只守住了 turnAnchorNotice 一处，漏了这里）。
+	if (exec && exec.agent) CURRENT_SESSION = sessionKeyOf(exec.agent);   // 归属判定必须用**本会话**的身份
+	if (plan && !isMine(plan)) return null;
+
 	// ② 开新活提醒（每步一次）
 	if (watchTools.has(toolName)) {
 		const n = newWorkNotice(d, plan, toolName);
 		if (n) return n;
 	}
-
-	// 【真机现场 · 2026-09-27】不是本会话的活 → 到这儿就停：**别渲染锚、别催**。
-	// 上一轮我只把守卫加在 turnAnchorNotice 里，**漏了这条路径** ✗ —— 所以
-	// "你正在做主线第 9 步"照样出现（另一个会话报的就是这句；我自己的会话也复现了）。
-	// "要不要接手"由上面的 turnAnchorNotice（E 分支）问过一次，够了。
-	if (exec && exec.agent) CURRENT_SESSION = sessionKeyOf(exec.agent);   // 归属判定必须用**本会话**的身份
-	if (plan && !isMine(plan)) return null;
 
 	// ③ 漂移预算提醒
 	return driftNotice(d, plan);
