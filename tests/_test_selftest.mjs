@@ -371,6 +371,16 @@ raw().prepare("UPDATE parking SET created_at = created_at - 5*86400000 WHERE pla
 const staleMsg = await call(G, 'plan_status', {});
 check('挂了超 3 天的泊位 → 主动举手并说清怎么关', /挂了超过 3 天/.test(staleMsg) && staleMsg.includes('plan_close'), staleMsg.slice(0, 220));
 
+// 【真机验收修正】额外步骤多的时候"极简"不能被顶回去：
+// 实测 #25 有 32 条额外步骤，逐条全列会让输出从 ~900 涨回 **2,900 字符** —— 那就白改了。
+const gid = raw().prepare("SELECT id FROM plans WHERE title='额外步定位样本'").get().id;
+for (let i = 2; i <= 30; i++) {
+	raw().prepare("INSERT INTO steps (plan_id, ord, detour_no, text, kind, status) VALUES (?,?,?,?,'detour','done')").run(gid, 100000 + i, i, `批量额外步 ${i}`);
+}
+const bigStatus = await call(G, 'plan_status', {});
+check('额外步骤 30 条时，极简版仍然很短（< 1200 字符）', bigStatus.length < 1200, `实际 ${bigStatus.length} 字符`);
+check('并且如实说明省略了多少条（不是静默截断）', /另有 \d+ 条已完成/.test(bigStatus), bigStatus.slice(0, 200));
+
 // ─────────────────────────────────────────────────────────────────────────────
 console.log('════════ plan-anchor 自测套 ════════');
 console.log(results.join('\n'));

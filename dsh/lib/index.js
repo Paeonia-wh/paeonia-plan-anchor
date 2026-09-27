@@ -1525,11 +1525,23 @@ function planStatus(d, args, scope = "") {
 					})] : []),
 				// 【问题4a · 2026-09-27】额外步骤也要列出来**并带 id** —— 主线步与额外步的 id 混在一条序列里，
 				// 不印 id 就没法从"额外第 27 条"推出该填什么（实测：为此得看全量，上下文紧时只能跳过）。
-				...(lineageDetours(d, plan).length ? ["", "额外步骤（同样带 id）：",
-					...lineageDetours(d, plan).map((s) => {
-						const mark = s.status === "done" ? "✔" : s.status === "skipped" ? "⊘中止" : cur && s.id === cur.id ? "⚙在做" : "·";
-						return `  ${mark} 额外步骤${s.detour_no}(id=${s.id}) ${String(s.text).slice(0, 30)}`;
-					})] : []),
+				// 【2026-09-27 真机验收修正】额外步骤要带 id，但**不能无限列**：
+				//   实测 #25 有 32 条额外步骤，全列出来把极简版顶回 2900 字符（白改了）。
+				//   规则：在做的那条 + 未完成的 + 最近 3 条已完成，最多 6 条；其余只报条数。
+				...(() => {
+					const _ds = lineageDetours(d, plan);
+					if (!_ds.length) return [];
+					const _hot = _ds.filter((s) => (cur && s.id === cur.id) || s.status !== "done");
+					const _hotIds = new Set(_hot.map((s) => s.id));
+					const _tail = _ds.filter((s) => !_hotIds.has(s.id) && s.status === "done").slice(-3);
+					const _show = [..._hot, ..._tail].slice(0, 6);
+					const _hidden = _ds.length - _show.length;
+					return ["", `额外步骤（带 id；共 ${_ds.length} 条，列 ${_show.length} 条${_hidden > 0 ? `，另有 ${_hidden} 条已完成 → 全量用 plan_status detail="full"` : ""}）：`,
+						..._show.map((s) => {
+							const mark = s.status === "done" ? "✔" : s.status === "skipped" ? "⊘中止" : cur && s.id === cur.id ? "⚙在做" : "·";
+							return `  ${mark} 额外步骤${s.detour_no}(id=${s.id}) ${String(s.text).slice(0, 30)}`;
+						})];
+				})(),
 				`漂移预算：已用 ${Math.round(budget(d, plan.id) * 10) / 10}/${threshold} 次无进展调用`,
 				...(muteLeft(d, plan.id) > 0 ? [`⏸ 主动提醒已静音，还剩 ${muteLeft(d, plan.id)} 次调用（静音不是免责，台账照记）`] : []),
 				"→ 单步全文：plan_status step=<id> ｜ 全部：plan_status detail=\"full\" ｜ 欠账清单：plan_park",
