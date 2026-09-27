@@ -4825,7 +4825,11 @@ function observe(d, exec) {
 	//     由来（实测连着两轮踩到）：用户说一句短的，agent 直接开工，没走 plan_detour，
 	//     是漂移提醒响了才回头补 —— **"把用户的话直接当指令"这个反射太快了**。
 	if (String(exec.name || "").startsWith("plan_")) planTouched.set(exec.agent, true);
+	// 【归属 · 2026-09-27 真机残留】这条提醒要求"把这件事记进计划"（plan_detour / plan_ask）——
+	// 而**本会话在这个目录没有自己的计划**时，它根本不可执行 ✗（真机现场：我一直在收到它，
+	// 却只能去动别人的线 ✗）。所以：只对"我这条线"说 ✓。
 	if (!shortWarned.has(exec.agent)
+		&& isMine(plan)
 		&& shortTurn.get(exec.agent)
 		&& !planTouched.get(exec.agent)
 		&& exec.name && !READ_ONLY_TOOLS.has(exec.name)) {

@@ -512,6 +512,21 @@ const ownerView = await call(FS1, 'plan_status', {});
 check('（正对照）属主照旧看到完整锚「▶ 要做」', /▶ 要做/.test(ownerView), ownerView.slice(0, 200));
 
 // ─────────────────────────────────────────────────────────────────────────────
+section('⑰ 记账提醒也要认归属（真机残留：我一直在收到它，却只能去动别人的线 ✗）');
+
+// 真机现场：本会话在 `d:\知识库` 没有自己的计划（那条 #25 是别人的）→ 却一直被提醒
+// 「🗒【记账提醒】…→ plan_detour 记一条」✗ —— 而 plan_detour 只会记到**别人的线**上 ✗，根本不可执行。
+const BK1 = { session: { header: { cwd: CWD + '-bk', id: 'session-bk-owner' } } };
+await call(BK1, 'plan_set', { title: '记账样本', reason: '自测：记账归属', steps: ['甲', '乙'] });
+const BK2 = { session: { header: { cwd: CWD + '-bk', id: 'session-bk-other' } } };   // 同目录，但那条线是别人的
+await say(BK2, '改');                                                                 // 一句短话 + 直接改文件
+const bkForeign = await fire(BK2, 'write');
+check('借来的线上，记账提醒不响（它根本不可执行）', !/记账提醒/.test(bkForeign), bkForeign.slice(0, 220) || '（安静）');
+await say(BK1, '改');                                                                 // 正对照：属主
+const bkOwner = await fire(BK1, 'write');
+check('（正对照）自己的线上，记账提醒照响', /记账提醒/.test(bkOwner), bkOwner.slice(0, 220));
+
+// ─────────────────────────────────────────────────────────────────────────────
 console.log('════════ plan-anchor 自测套 ════════');
 console.log(results.join('\n'));
 console.log(`\n合计：${pass} 过 / ${fail} 失败`);
