@@ -4847,6 +4847,13 @@ function observe(d, exec) {
 		if (n) return n;
 	}
 
+	// 【真机现场 · 2026-09-27】不是本会话的活 → 到这儿就停：**别渲染锚、别催**。
+	// 上一轮我只把守卫加在 turnAnchorNotice 里，**漏了这条路径** ✗ —— 所以
+	// "你正在做主线第 9 步"照样出现（另一个会话报的就是这句；我自己的会话也复现了）。
+	// "要不要接手"由上面的 turnAnchorNotice（E 分支）问过一次，够了。
+	if (exec && exec.agent) CURRENT_SESSION = sessionKeyOf(exec.agent);   // 归属判定必须用**本会话**的身份
+	if (plan && !isMine(plan)) return null;
+
 	// ③ 漂移预算提醒
 	return driftNotice(d, plan);
 }

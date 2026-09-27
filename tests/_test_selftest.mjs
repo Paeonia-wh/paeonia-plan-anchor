@@ -425,6 +425,13 @@ const secondBorrow = await turn(BX, '继续');
 check('**不再**出现「你正在做 / ⚙ 在做」那种自相矛盾的说法', !/你正在做|⚙ 在做/.test(secondBorrow), secondBorrow.slice(0, 180));
 check('也不催（借来的计划不该催到不相干的会话头上）', !secondBorrow.includes('回合没有任何变化'), secondBorrow.slice(0, 160));
 
+// 【补 · 2026-09-27 真机】真正那句「你正在做…」的**原产地是"开新活"提醒**（不是漂移质问）：
+// 一个会话在**别人的**计划上调用 todo_write / task_create / subagent 时，会被告知
+// 「【计划锚】你正在做主线第 N 步，却调用了 todo_write 开了一项新活」✗ —— 这正是另一位会话报的原话。
+// 所以直接照那个形状测：在借来的计划上开一项新活。
+const deepBorrow = await fire(BX, 'todo_write', { tasks: [{ content: '顺手记个待办' }] });
+check('堵住"开新活"路径：借来的计划上不说「你正在做主线第 N 步」', !/你正在做|⚙ 在做/.test(deepBorrow), deepBorrow.slice(0, 220) || '（安静）');
+
 const budgetOf = () => Number((raw().prepare("SELECT value FROM plan_state WHERE plan_id=(SELECT id FROM plans WHERE title='借来的线') AND key='calls_since_update'").get() || {}).value || 0);
 const beforeB = budgetOf();
 for (let i = 0; i < 15; i++) await turn(BX, '继续');
