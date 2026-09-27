@@ -780,8 +780,9 @@ const MUTATING_TOOLS = new Set(["planDiscover", "planGoto", "planClose", "planAm
  * 会话身上 ✗ —— 真正要动手的那个反而没人拦（那是把"防两头做"降级成"防第一次"）。
  * 只读工具不受影响 ✓：你问它才答 = 正确形态。
  */
-function refuseIfNotMine(d, scope, session, label) {
-	const plan = activePlan(d, scope, session);
+function refuseIfNotMine(d, scope, session, label, wantId = 0) {
+	// 【按 id 动手 · 2026-09-28】归属必须看**同一个 id** —— 否则"传别人的 id、闸查我自己那条"就是绕过 ✗
+	const plan = wantId ? d.prepare("SELECT * FROM plans WHERE id=?").get(wantId) : activePlan(d, scope, session);
 	if (!plan) return null;
 	// ⚠️ 归属必须用**传进来的 session** 判，不能靠全局 CURRENT_SESSION ——
 	// planStepDone/planNote/planAsk **不走 withRefs** ✗，全局值可能是别的调用留下的 ✗
@@ -812,13 +813,17 @@ function withRefs(d, args, scope, fn, session = "") {
 	// 【设当前会话】整段执行期间 activePlan 都认这个会话；结束还原（嵌套调用也安全）
 	const _prevSession = CURRENT_SESSION;
 	CURRENT_SESSION = session || "";
+	// 【按 id 动手 · 2026-09-28】可选 plan_id：同一身份有多条线时，指定要动哪一条 ✓
+	// ⚠️ **必须在闸之前声明** —— 第一版我把它放在闸后面 ✗ → 每次改状态的调用都抛 `Cannot access '_wantPlanId' before initialization`（TDZ）✗
+	// → 被外层 catch 吞成"引用解析出错（已跳过归一）" ✗ → **归一化静默被跳过**（断言还全过 ✗）。改到这里 ✓。
+	const _wantPlanId = Number(a.plan_id || 0);
 	try {
 		// 【② 判据改造 · 2026-09-27】会改计划状态的工具：**伸手那一刻**检查归属（只读的放行 ✓）
 		if (MUTATING_TOOLS.has(fn && fn.name)) {
-			const _refusal = refuseIfNotMine(d, scope, session, `plan_${String((fn && fn.name) || "").replace(/^plan/, "").toLowerCase()}`);
+			const _refusal = refuseIfNotMine(d, scope, session, `plan_${String((fn && fn.name) || "").replace(/^plan/, "").toLowerCase()}`, _wantPlanId);
 			if (_refusal) return _refusal;
 		}
-		const plan = activePlan(d, scope);
+	const plan = _wantPlanId ? d.prepare("SELECT * FROM plans WHERE id = ?").get(_wantPlanId) : activePlan(d, scope);
 		if (plan) {
 			for (const [idKey, ordKey] of REF_PAIRS) {
 				const hasId = Number(a[idKey] || 0) !== 0;
@@ -1627,6 +1632,20 @@ function planStatus(d, args, scope = "") {
 	// 只读：不改任何状态；查别人的线也允许（E 分支的文案本来就写着"plan_status 看只读状态"）。
 	const _wantId = Number(args && args.plan_id || 0);
 	const plan = _wantId ? d.prepare("SELECT * FROM plans WHERE id=?").get(_wantId) : activePlan(d, scope);
+	// 【按 id 查询也要认归属 · 2026-09-28】不是本会话的线 → 只给**中性摘要**（与锚的源头兜底同一口径 ✓）：
+	// 标题 + 停在哪一步 + 两个出口；**不再给步骤明细 / 泊位明细** ✓。（只读 ✓，但"翻别人家务"没必要 ✓）
+	if (_wantId && plan && plan.owner && plan.owner !== CURRENT_SESSION) {
+		const _st = planSteps(d, plan.id);
+		const _cur = currentStep(d, plan.id);
+		return { ok: true, has_plan: true, foreign: true, briefing: [
+			`📂 这条线**不是本会话开的**：《${plan.title}》｜${progressText(_st.filter((s) => s.status === "done").length, _st.length)}`,
+			_cur ? `   它停在：${stepLabel(_cur)}「${cueShort(_cur, 50)}」` : "",
+			"",
+			"▶ 两个出口：",
+			`   · 确实要接手它 → \`plan_claim({ plan_id: ${plan.id} })\`（认领会挤掉对方 —— 先确认那条线没人正在做）`,
+			"   · 干自己的活 → `plan_set` 立一条（同目录并存，不影响它）",
+		].filter(Boolean).join("\n") };
+	}
 	if (_wantId && !plan) return { ok: false, reason: `计划 #${_wantId} 不存在。` };
 	if (!plan) {
 		const head = anchorText(d, null, { scopeHint: scope || "（本次调用拿不到会话工作目录，退化到默认作用域）" });
@@ -1854,8 +1873,9 @@ function planStatus(d, args, scope = "") {
 
 /** 3. plan_step_done：完成当前步（evidence 必填，防"假装推进"） */
 function planStepDone(d, args, scope = "", session = "") {
-	const plan = activePlan(d, scope, session);   // 【问题7】必须用**传进来的**会话：本函数不走 withRefs，全局 CURRENT_SESSION 可能是别人的
-	{ const _r = refuseIfNotMine(d, scope, session, "plan_step_done"); if (_r) return _r; }   // 【伸手就拦】
+	// 【按 id 动手 · 2026-09-28】可选 plan_id ✓（这个工具不走 withRefs，得自己认）
+	const plan = Number(args.plan_id || 0) ? d.prepare("SELECT * FROM plans WHERE id = ?").get(Number(args.plan_id)) : activePlan(d, scope, session);
+	{ const _r = refuseIfNotMine(d, scope, session, "plan_step_done", Number(args.plan_id || 0)); if (_r) return _r; }   // 【伸手就拦】
 	if (!plan) return { ok: false, reason: "没有生效计划" };
 	const cur = currentStep(d, plan.id);
 	if (!cur) return { ok: false, reason: "当前没有进行中的步骤", briefing: anchorText(d, plan) };
@@ -3139,8 +3159,9 @@ function planNote(d, args, scope = "", session = "") {
 	// 【强制点】任何一次有意义的回应都清掉「提醒被无视」的水印
 	// （只用 scope —— 这几个函数里有的没有 session 参数，别依赖它）
 	{ const _p = activePlan(d, scope, session); if (_p) { clearWarnUnanswered(d, _p.id); markFresh(d, _p.id); } }
-	const plan = activePlan(d, scope, session);   // 【问题7】同上
-	{ const _r = refuseIfNotMine(d, scope, session, "plan_note"); if (_r) return _r; }   // 【伸手就拦】
+	// 【按 id 动手 · 2026-09-28】可选 plan_id ✓（这个工具不走 withRefs，得自己认）
+	const plan = Number(args.plan_id || 0) ? d.prepare("SELECT * FROM plans WHERE id = ?").get(Number(args.plan_id)) : activePlan(d, scope, session);
+	{ const _r = refuseIfNotMine(d, scope, session, "plan_note", Number(args.plan_id || 0)); if (_r) return _r; }   // 【伸手就拦】
 	if (!plan) return { ok: false, reason: "当前项目没有生效计划 —— 没有计划就没有预算可清。" };
 	const cur = currentStep(d, plan.id);
 	const text = (args.text || "").trim();
@@ -3264,8 +3285,9 @@ const ASK_KINDS = {
 };
 
 function planAsk(d, args, scope = "", session = "") {
-	const plan = activePlan(d, scope, session);   // 【问题7】同上
-	{ const _r = refuseIfNotMine(d, scope, session, "plan_ask"); if (_r) return _r; }   // 【伸手就拦】
+	// 【按 id 动手 · 2026-09-28】可选 plan_id ✓（这个工具不走 withRefs，得自己认）
+	const plan = Number(args.plan_id || 0) ? d.prepare("SELECT * FROM plans WHERE id = ?").get(Number(args.plan_id)) : activePlan(d, scope, session);
+	{ const _r = refuseIfNotMine(d, scope, session, "plan_ask", Number(args.plan_id || 0)); if (_r) return _r; }   // 【伸手就拦】
 	if (!plan) return { ok: false, reason: "当前项目没有生效计划 —— 没有计划就谈不上「偏离计划」。" };
 	const kind = String(args.kind || "").trim();
 	if (!ASK_KINDS[kind]) {
@@ -4479,6 +4501,7 @@ function apply(ctx, config) {
 			name: "plan_step_done",
 			description: "完成当前步（evidence 必填）。若当前处于偏离态，完成后会自动回到挂起的计划步骤。",
 			params: {
+				plan_id: { type: "number", description: "要动**哪一条线**（可选）。本目录里你有多条自己的线时用它指定 —— 归属照旧由护栏把关" },
 				evidence: { type: "string", description: "必填。凭什么算做完了：跑了什么、看到了什么" },
 				no_work_reason: { type: "string", description: "仅当本步期间没有任何工具调用时必填：说明为什么这一步不需要工具（会记进台账）" }
 			},
@@ -4488,6 +4511,7 @@ function apply(ctx, config) {
 			name: "plan_discover",
 			description: "执行中发现新问题 → **必须显式判定处置**：permit（阻塞当前步，现在做）/ defer（现在不做，入泊位）/ decline（判定不做）。三值不可省略，新问题不许含糊地留在半空。",
 			params: {
+				plan_id: { type: "number", description: "要动**哪一条线**（可选）。本目录里你有多条自己的线时用它指定 —— 归属照旧由护栏把关" },
 				text: { type: "string", required: true, description: "一句话写清这个新发现的问题" },
 				severity: { type: "string", description: "普通就不填。填 urgent = 「要求打断计划」：必须同时给 reason（拖延的代价），且必须经用户批准（先不带 user_approved 调一次拿到问句；同意后再带 user_approved: true 调）" },
 				reason: { type: "string", description: "severity=urgent 时必填：拖延的代价是什么（数据会丢 / 安全风险 / 堵住别人）。紧急 ≠ 我想做" },
@@ -4504,6 +4528,7 @@ function apply(ctx, config) {
 			name: "plan_goto",
 			description: "显式改焦点：回到某个计划步骤（step_id）或把泊位条目提上来做（park_id）。必须写 reason，会记入漂移台账。",
 			params: {
+				plan_id: { type: "number", description: "要动**哪一条线**（可选）。本目录里你有多条自己的线时用它指定 —— 归属照旧由护栏把关" },
 				step_id: { type: "number", description: "目标步骤 id" },
 				step_ord: { type: "number", description: "也可以直接填「主线第几步」（序号），我会换算成 id" },
 				park_id: { type: "number", description: "要提取的泊位条目 id" },
@@ -4523,6 +4548,7 @@ function apply(ctx, config) {
 			name: "plan_close",
 			description: "把泊位条目显式关闭（判定不做）。reason 必填 —— 禁止静默丢弃欠账；泊位只进不出会让清单烂掉。",
 			params: {
+				plan_id: { type: "number", description: "要动**哪一条线**（可选）。本目录里你有多条自己的线时用它指定 —— 归属照旧由护栏把关" },
 				park_id: { type: "number", description: "泊位 id" },
 				park_ord: { type: "number", description: "或直接填「泊位 N」里的 N（序号）" },
 				reason: { type: "string", description: "必填。为什么关闭它" },
@@ -4534,6 +4560,7 @@ function apply(ctx, config) {
 			name: "plan_amend",
 			description: "原地修订某一步的内容（文字/验收/files/commands）。**编号不变、身份不变、历史保留**——改计划用这个，别用 plan_set 整份重建。reason 必填。",
 			params: {
+				plan_id: { type: "number", description: "要动**哪一条线**（可选）。本目录里你有多条自己的线时用它指定 —— 归属照旧由护栏把关" },
 				step_id: { type: "number", description: "要改的步骤 id" },
 				step_ord: { type: "number", description: "或直接填序号「第几步」" },
 				text: { type: "string", description: "新的步骤文字（不给则不改）" },
@@ -4548,6 +4575,7 @@ function apply(ctx, config) {
 			name: "plan_insert",
 			description: "在某一步之后插入步骤（after_step_id=0 表示插到最前）。当前焦点不会被带跑；编号顺延并在回执里明说。reason 必填。",
 			params: {
+				plan_id: { type: "number", description: "要动**哪一条线**（可选）。本目录里你有多条自己的线时用它指定 —— 归属照旧由护栏把关" },
 				after_step_id: { type: "number", description: "在哪个步骤之后插入（0 = 插到最前面）" },
 				after_ord: { type: "number", description: "或直接填序号：插在「第几步」之后" },
 				steps: { type: "array", required: true, items: { type: "json" }, description: "要插入的步骤（字符串或 {text, acceptance, files, commands}）" },
@@ -4560,6 +4588,7 @@ function apply(ctx, config) {
 			name: "plan_drop",
 			description: "丢弃一步（只标记不删行，历史可查）。若丢的是当前步，焦点自动顺延到下一个待办。reason 必填。",
 			params: {
+				plan_id: { type: "number", description: "要动**哪一条线**（可选）。本目录里你有多条自己的线时用它指定 —— 归属照旧由护栏把关" },
 				step_id: { type: "number", description: "要丢弃的步骤 id" },
 				step_ord: { type: "number", description: "或直接填序号「第几步」" },
 				reason: { type: "string", description: "必填。为什么不做了" }
@@ -4570,6 +4599,7 @@ function apply(ctx, config) {
 			name: "plan_rework",
 			description: "执行中声明「某一步（可能早就完成了）的产出有问题，我要返工它」。记为一条挂在旧步骤上的支线（显示为额外步骤），做完自动回到主线；不计入偏离额度。reason 必填。",
 			params: {
+				plan_id: { type: "number", description: "要动**哪一条线**（可选）。本目录里你有多条自己的线时用它指定 —— 归属照旧由护栏把关" },
 				step_id: { type: "number", description: "要返工的主线步骤 id" },
 				step_ord: { type: "number", description: "或直接填序号「第几步」" },
 				reason: { type: "string", description: "必填。为什么判定它的产出有问题" },
@@ -4626,6 +4656,7 @@ function apply(ctx, config) {
 			name: "plan_ask",
 			description: "该不该问用户 —— 按三档判定：must（必问，不许静默继续）/ once（问一次，照办）/ note（不问，只记账，收尾时一起摆）。规则来自 AAEF 审批质量与疲劳、Horvitz 期望值、Carey & Everitt 的 corrigibility。",
 			params: {
+				plan_id: { type: "number", description: "要动**哪一条线**（可选）。本目录里你有多条自己的线时用它指定 —— 归属照旧由护栏把关" },
 				kind: { type: "string", required: true, description: "irreversible | acceptance | scope-out | conflict | structure | uncertain | detail | authorized" },
 				what: { type: "string", required: true, description: "要做的**具体动作**与影响（泛泛地问会被拒）" }
 			},
@@ -4656,6 +4687,7 @@ function apply(ctx, config) {
 			name: "plan_note",
 			description: "声明「我仍在这一步上，进展是 X」—— 漂移预算只认计划状态变化，合法长活会被误判成没推进；用这个清零预算并记台账（台账记的是「自称在轨」，与「真的完成」区分开）。",
 			params: {
+				plan_id: { type: "number", description: "要动**哪一条线**（可选）。本目录里你有多条自己的线时用它指定 —— 归属照旧由护栏把关" },
 				// text 故意不在 schema 层标 required：留给代码层拒绝并解释「空话不算在轨依据」
 				text: { type: "string", description: "必填。一句话说清你这一步目前的进展" }
 			},
@@ -4677,6 +4709,7 @@ function apply(ctx, config) {
 			name: "plan_gc",
 			description: "陈旧工件衰减：把**够老的**已完成步骤依据截断（保留前缀，不抹除）+ 清掉够老的 scope 观察记录。默认只预演，带 confirm 才真动；每次真动都写台账（不许静默）。与 plan_compact 分工：compact 聚合计数型台账，gc 衰减工件体积。",
 			params: {
+				plan_id: { type: "number", description: "要动**哪一条线**（可选）。本目录里你有多条自己的线时用它指定 —— 归属照旧由护栏把关" },
 				older_than_days: { type: "number", description: "只动这么久以前的（默认 30 天）" },
 				keep_evidence_chars: { type: "number", description: "依据保留前多少字符（默认 80，最小 20）—— 衰减不是抹除" },
 				confirm: { type: "boolean", description: "true 才真衰减；不传 = 只预演（默认）" }

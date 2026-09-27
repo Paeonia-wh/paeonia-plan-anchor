@@ -566,6 +566,31 @@ for (let i = 0; i < 5; i++) await fire(EP, 'write');
 const gp = await preGate(EP, 'write');
 check('（正对照）有自己计划 → 永远放行', gp.kind === 'allow', JSON.stringify(gp).slice(0, 140));
 
+// ─────────────────────────────────────────────────────────────────────────────
+section('⑲ 两处留白已修：按 id 动手 / 按 id 查询认归属');
+
+const G1 = { session: { header: { cwd: CWD + '-gaps', id: 'session-gap-owner' } } };
+await call(G1, 'plan_set', { title: '多线 A', reason: '自测：按 id 动手', steps: ['甲', '乙'] });
+const gapScope = raw().prepare("SELECT scope FROM plans WHERE title='多线 A'").get().scope;
+const gOwner = raw().prepare("SELECT owner FROM plans WHERE title='多线 A'").get().owner;
+raw().prepare("INSERT INTO plans (title,version,status,scope,owner,created_at) VALUES (?,1,'active',?,?,?)").run('多线 B', gapScope, gOwner, Date.now());
+const aId = raw().prepare("SELECT id FROM plans WHERE title='多线 A'").get().id;
+const bId = raw().prepare("SELECT id FROM plans WHERE title='多线 B'").get().id;
+
+check('同域多线：默认解析到较新的那条', (await call(G1, 'plan_status', {})).includes('多线 B'), '');
+check('按 id 能看旧那条（留白①：能看 ✓）', (await call(G1, 'plan_status', { plan_id: aId })).includes('多线 A'), '');
+const aDone = await call(G1, 'plan_step_done', { plan_id: aId, evidence: '旧线的第一步做完了', no_work_reason: '自测' });
+check('按 id 能**动手**旧那条（留白①已修）', /已关闭/.test(aDone), aDone.slice(0, 180));
+const aN = raw().prepare("SELECT COUNT(*) c FROM steps WHERE plan_id=? AND status='done'").get(aId).c;
+const bN = raw().prepare("SELECT COUNT(*) c FROM steps WHERE plan_id=? AND status='done'").get(bId).c;
+check('关的是**指定**那条，没串到另一条', aN === 1 && bN === 0, `A=${aN} B=${bN}`);
+
+const GS = { session: { header: { cwd: gapScope, id: 'session-gap-stranger' } } };
+const sv = await call(GS, 'plan_status', { plan_id: aId });
+check('别人的线：按 id 查只给中性摘要（留白②已修，不给步骤明细）', /不是本会话开的/.test(sv) && !/主线步骤（短版/.test(sv), sv.slice(0, 220));
+const sDone = await call(GS, 'plan_step_done', { plan_id: bId, evidence: '想动别人的线', no_work_reason: '试' });
+check('⛔ 绕过测试：传**别人的 id** 动手 → 照样被拦（归属跟着同一个 id ✓）', sDone.includes('别的会话的线'), sDone.slice(0, 200));
+
 console.log('════════ plan-anchor 自测套 ════════');
 console.log(results.join('\n'));
 console.log(`\n合计：${pass} 过 / ${fail} 失败`);
